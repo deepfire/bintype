@@ -9,57 +9,65 @@
 (defvar *types* (make-hash-table))
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
-  (defclass depobj ()
-    ((deps :accessor depobj-deps :initarg :deps :type list :initform nil)))
-
-  (defun depend (o dep)
-    (declare (type depobj o dep))
-    (push dep (depobj-deps o)))
-
-  (defclass btobj (depobj)
-    ((instance :accessor btobj-instance :initarg :instance)))
+  (defclass btobj ()
+    ((offset :accessor btobj-offset :initarg :offset)
+     (postoffset :accessor btobj-postoffset :initarg :postoffset)
+     (field :accessor btobj-field :initarg :field)
+     (parent :accessor parent :initarg :parent)
+     (value :accessor btobj-value :initarg :value)
+     (value-fn :accessor btobj-value-fn :initarg :value-fn)))
 
   (defclass btcontainer (btobj)
     ((childs :accessor btcontainer-childs :initarg :childs)))
 
-  (defclass btsequence (btcontainer)
+  (defun btcontainer-paved-p (container)
+    (not (null (btcontainer-childs container))))
+
+  (defclass btordered (btcontainer)
+    ((dimension :accessor btordered-dimension)
+     (stride :accessor btordered-stride)
+     (contained-type :accessor btordered-contained-type)
+     (sub-value-fn :accessor btordered-sub-value-fn)))
+
+  (defclass btstructured (btcontainer)
+    ((bintype :accessor btstructured-bintype :initarg :bintype)))
+
+  (defclass btleaf (btcontainer)
     ())
 
-  (defclass btstruct (btcontainer)
-    ())
+  (defgeneric cref (container sel)
+    (:method ((btcontainer btsequence) (sel integer))
+      (elt (btcontainer-childs btcontainer) sel))
+    (:method ((btcontainer btstruct) (sel symbol))
+      (gethash sel (btcontainer-childs btcontainer))))
 
-  (defgeneric cref (container spec)
-    (:method ((btcontainer btsequence) (spec integer))
-      (elt (btcontainer-childs btcontainer) spec))
-    (:method ((btcontainer btstruct) (spec symbol))
-      (cadr (assoc spec (btcontainer-childs btcontainer)))))
+  (defgeneric (setf cref) (val container sel)
+    (:method (val (btcontainer btsequence) (sel integer))
+      (setf (elt (btcontainer-childs btcontainer) sel) val))
+    (:method (val (btcontainer btstruct) (sel symbol))
+      (setf (gethash sel (btcontainer-childs btcontainer)) val)))
 
-  (defgeneric (setf cref) (val container spec)
-    (:method (val (btcontainer btsequence) (spec integer))
-      (setf (elt (btcontainer-childs btcontainer) spec) val))
-    (:method (val (btcontainer btstruct) (spec symbol))
-      (if-let ((acell (assoc spec (btcontainer-childs btcontainer))))
-	      (setf (cadr acell) val))))
+  (defstruct field
+    name	;; as appears in the resulting type
+    type-name	;; name of the containing type
+    sem		;; parsed pieces
+    spec	;; parsed pieces
+    ext		;; parsed pieces
+    setter accessor-name type parser-class)
 
-  (defclass btleaf (btobj)
-    ())
+  (defmethod make-load-form ((field field) &optional env)
+    (make-load-form-saving-slots field :environment env))
 
-  (defstruct fieldspec
-    name sem spec-form ext accessor getter setter)
-
-  (defmethod make-load-form ((fieldspec fieldspec) &optional env)
-    (make-load-form-saving-slots fieldspec :environment env))
-
-  (defmethod print-object ((fspec fieldspec) stream)
-    (format stream "#S(BINTYPE::FIELDSPEC NAME: ~S METHOD: ~S SPEC: ~S)"
-	    (fieldspec-name fspec) (fieldspec-sem fspec) (fieldspec-spec-form fspec)))
+  (defmethod print-object ((field field) stream)
+    (format stream "#S(BINTYPE::FIELD NAME: ~S METHOD: ~S SPEC: ~S)"
+	    (field-name fspec) (field-sem fspec) (field-spec field)))
 
   (defstruct bintype
     (name nil :type symbol)
     (documentation nil :type string)
-    maker
+    instantiator
     parser
-    fieldspecs)
+    fields)
 
   (defun bintype (name)
     (declare (type symbol name))
@@ -68,27 +76,14 @@
 	(error "Unable to find the requested bintype ~S." name))
       ret))
 
-  (defun fieldspec (bintype name)
-    (find name (bintype-fieldspecs bintype) :key #'fieldspec-name))
+  (defun field (bintype name)
+    (find name (bintype-fields bintype) :key #'field-name))
 
-  (defun fieldspec-outputs-field-p (fieldspec)
-    (not (member (fieldspec-sem fieldspec) '(:mag :pad))))
+  (defun sem-outputs-field-p (sem)
+    (not (member sem '(:mag :pad))))
 
-  (defun fieldspec-output-field (fieldspec)
-    (let ((*break-on-signals* t))
-      `(,(fieldspec-name fieldspec) nil :type
-	 (or null
-	     ,(eval `(macrolet ((zero-terminate-string (first &rest rest) (declare (ignore rest)) first)
-				(out-of-stream-absolute (offset form) (declare (ignore offset)) form)
-				(sequence (element-type &key format &allow-other-keys)
-				  (declare (ignore element-type))
-				  (ecase (second format) (vector ''simple-vector) (list ''list)))
-				(plain (type)
-				  `',(simple-typespec-lisp-type type))
-				(enum (type spec)
-				  (declare (ignore type spec))
-				  ''keyword))
-		       ,(fieldspec-spec-form fieldspec)))))))
+  (defun field-spec-outputs-field-p (field)
+    (sem-outputs-field-p (field-sem field)))
 
   (defun simple-typespec-lisp-type (typespec)
     (cond ((keywordp typespec)
@@ -103,98 +98,61 @@
 	  (t
 	   (error "Bad type specification: ~S." typespec))))
 
+  (defun simple-typespec-width (typespec)
+    (cond ((keywordp typespec)
+	   (ecase typespec
+	     (:unsigned-byte-32 4)
+	     (:unsigned-byte-16 2)
+	     (:unsigned-byte-8 1)))
+	  ((symbolp typespec)
+	   (unless (bintype typespec)
+	     (error "Reference to an inexistent binary type ~S." typespec))
+	   typespec)
+	  (t
+	   (error "Bad type specification: ~S." typespec))))
 
-  (defun output-parser-lambda (fieldspecs)
-    "Output a bintype's parser lambda within a lexenv having BINTYPE and FIELDSPECS bound."
-    `(lambda (sequence bintype &optional (offset 0) parent endianness)
-       (declare (ignorable parent))
-       (let* ((instance (funcall (bintype-maker bintype)))
-	      (point offset) word16-accessor word32-accessor)
-	 (declare (special point))
-	 (labels ((set-endianness (new-endianness)
-		    (setf (values word16-accessor word32-accessor)
-			  (case new-endianness
-			    (:little-endian (values #'sequence-word16-le #'sequence-word32-le))
-			    (:big-endian    (values #'sequence-word16-be #'sequence-word32-be)))))
-		  (word16-accessor (sequence offset)
-		    (unless word16-accessor
-		      (error "Attempt to use endian-dependent access with no endianness specified."))
-		    (funcall word16-accessor sequence offset))
-		  (word32-accessor (sequence offset)
-		    (unless word32-accessor
-		      (error "Attempt to use endian-dependent access with no endianness specified."))
-		    (funcall word32-accessor sequence offset))
-		  (sref (slot-name)
-		    (funcall (fieldspec-getter (fieldspec bintype slot-name)) instance))
-		  (simple-access (seq offset typespec)
-		    (declare (type sequence seq) (type integer offset))
-		    (cond ((keywordp typespec)
-			   (ecase typespec
-			     (:unsigned-byte-8 (values (elt seq offset) (1+ offset)))
-			     (:unsigned-byte-16 (values (word16-accessor seq offset) (+ 2 offset)))
-			     (:unsigned-byte-32 (values (word32-accessor seq offset) (+ 4 offset)))))
-			  ((symbolp typespec)
-			   (parse-binary sequence (bintype typespec) offset parent endianness))
-			  (t (error "Botched typespec: ~S." typespec))))
-		  (seek (typespec)
-		    (values nil (+ point typespec)))
-		  (plain (typespec)
-		    (simple-access sequence point typespec))
-		  (enum (typespec alist)
-		    (multiple-value-bind (value new-offset) (simple-access sequence point typespec)
-		      (let ((match (cadr (assoc value alist :test #'=))))
-			(unless match
-			  (error "Got ~X at offset ~X, instead of an expected a value matching the enumerated set ~S."
-				 value point alist))
-			(let ((match (if (consp match) match (list match))))
-			  (dolist (op (rest match))
-			    (ecase (first op)
-			      (set-endianness
-			       (setf endianness (second op))
-			       (set-endianness (second op)))))
-			  (values (first match) new-offset)))))
-		  (sequence (typespec &key count stride (format 'list))
-		    (declare (dynamic-extent point))
-		    (values
-		     (ecase format
-		       (vector (loop :with vector = (make-array count)
-				     :for i :from 0 :below count
-				     :for cur :from point :by stride
-			          :do (setf (svref vector i) (simple-access sequence cur typespec))
-				  :finally (return vector)))
-		       (list (loop :for i :from 0 :below count
-				   :for cur :from point :by stride
-			        :collect (simple-access sequence cur typespec))))
-		     (+ point (* count stride)))))
-	   (declare (ignorable #'seek #'sref))
-	   (macrolet ((out-of-stream-absolute (offset form)
-			`(values (let ((point ,offset))
-				   (declare (special point))
-				   ,form)
-				 point))
-		      (zero-terminate-string (vector-form)
-			(with-gensyms (vector offset) 
-			  `(multiple-value-bind (,vector ,offset) ,vector-form
-			     (values
-			      (subseq ,vector 0 (min (1- (length ,vector)) (position 0 ,vector)))
-			      ,offset)))))
-	     (set-endianness endianness)
-	     ,@(loop :for fieldspec :in fieldspecs :collect
-		  `(multiple-value-bind (value new-offset) ,(fieldspec-spec-form fieldspec)
-		     (declare (ignorable value))
-		     ,(ecase (fieldspec-sem fieldspec)
-			     (:pad)
-			     (:mag 
-			      `(let ((magic ,(first (fieldspec-ext fieldspec))))
-				 (when (funcall (if (typep value 'sequence)
-						    #'mismatch (compose #'not #'=))
-						value magic)
-				   (error "~S, offset ~S: expected ~S, got ~S."
-					  (bintype-name bintype) point magic value))))
-			     ((:dep :imm :seq)
-			      `(setf (,(fieldspec-accessor fieldspec) instance) value)))
-		     (setf point new-offset)))
-	     instance))))))
+  (defun spec-extract-type (spec)
+    (eval `(flet ((zero-terminate-string (&rest rest)  (declare (ignorable rest)) (first rest))
+		  (out-of-stream-absolute (&rest rest) (declare (ignorable rest)) (second rest))
+		  (sequence (element-type &key (format 'list) &allow-other-keys)
+		    (declare (ignore element-type))
+		    (ecase format (vector 'simple-vector) (list 'list)))
+		  (plain (&rest rest)		       (simple-typespec-lisp-type (first rest)))
+		  (enum (&rest rest)		       (declare (ignorable rest)) 'keyword))
+	     ,spec)))
+
+  (defun spec-field-definition (field)
+    `(,(field-field-name field) nil :type (or null ,(field-extract-type (field-spec field)))))
+
+  (defun spec-extract-inflow-p (spec)
+    (eval `(flet ((zero-terminate-string (&rest rest)  (declare (ignorable rest)) (first rest))
+		  (out-of-stream-absolute (&rest rest) (declare (ignorable rest)) nil)
+		  (sequence (&rest rest)	       (declare (ignorable rest)) t)
+		  (plain (&rest rest)		       (declare (ignorable rest)) t)
+		  (seek (&rest rest)		       (declare (ignorable rest)) t)
+		  (enum (&rest rest)		       (declare (ignorable rest)) t))
+	     ,spec)))
+
+  (defun spec-extract-flowsizeform (spec)
+    "Doesn't have to introduce the expression-caused dependencies: everything needed is already
+     depended upon by the spec form."
+    (eval `(macrolet ((zero-terminate-string (&rest rest) (first rest))
+		      (sequence (typespec &key count stride &allow-other-keys)
+			(declare (ignorable typespec) (type integer count stride)) 
+			`(* ,count ,stride))
+		      (plain (&rest rest) `(simple-typespec-width ,(first rest)))
+		      (seek (&rest rest) (first rest))
+		      (enum (&rest rest) `(simple-typespec-width ,(first rest))))
+	     ,spec)))
+
+  (defun spec-deduce-parser-class (spec)
+    (eval `(flet ((zero-terminate-string (&rest rest)  (declare (ignorable rest)) 'btobj)
+		  (out-of-stream-absolute (&rest rest) (declare (ignorable rest)) (second rest))
+		  (sequence (&rest rest)	       (declare (ignorable rest)) 'btsequence)
+		  (plain (&rest rest)		       (declare (ignorable rest)) 'btobj)
+		  (seek (&rest rest)		       (declare (ignorable rest)) 'btobj)
+		  (enum (&rest rest)		       (declare (ignorable rest)) 'btobj))
+	     ,spec)))
 
 (defun sequence-word16-le (seq offset)
   (logior (ash (elt seq (+ offset 0)) 0)
@@ -216,44 +174,125 @@
 	  (ash (elt seq (+ offset 1)) 16)
 	  (ash (elt seq (+ offset 0)) 24)))
 
-(defun parse-binary (sequence bintype &optional (offset 0) parent endianness)
-  (declare (type sequence sequence) (type bintype bintype) (integer offset))
-  (funcall (bintype-parser bintype) sequence bintype offset parent endianness))
-	   
+(defun output-type-definition (name fields)
+  `(defstruct ,name ,@(mapcar #'spec-field-definition fields)))
+
+(defun output-field-accessor-registration (type-name fields-var-symbol)
+  `(loop :for field :in ,fields-var-symbol
+      (let* ((symbol (format-symbol (symbol-package type-name) "~A-~A"
+				    type-name (field-name field))))
+	(setf (field-setter field) (fdefinition (list setf symbol))
+	      (field-accessor-name field) symbol))))
+
+(defun output-bintype-instantiator-registration (name bintype-symbol)
+  `(setf (bintype-instantiator ,bintype-symbol)
+	 (fdefinition ',(format-symbol (symbol-package name) "MAKE-~A" name))))
+
+(defgeneric postoffsetify (instance btobject offset)
+  "Fill the POSTOFFSET slot of an OBJ, effectively performing the last step
+   for making it walkable."
+  (:method ((instance null) (obj btleaf) incoming)
+    (setf (btobj-postoffset obj) (+ incoming (spec-leaf-width (field-spec (btobj-field obj))))))
+  (:method ((instance null) (obj btordered) incoming)
+    (setf (btobj-postoffset obj)
+	  (+ incoming (loop :for i :from 0 :below (btordered-dimension obj)
+			    :for offset :from incoming :by (btordered-stride obj)
+			    :for postoffset :from (+ incoming (btordered-stride obj))
+					    :by (btordered-stride obj) :do
+			 (setf (cref obj i) (make-instance (btordered-contained-type obj)
+					     :parent obj :offset offset :postoffset postoffset
+					     :value-fn (btordered-sub-value-fn obj)))
+		         :finally (return (* (btordered-stride obj) (btordered-dimension obj))))))))
+
+(defun output-postoffsetify-method (name fields)
+  (with-gensyms (instance obj offset bintype obj field-obj field-instance)
+    `(defmethod postoffsetify ((,instance ,name) (,obj btstructured) ,offset)
+       (let ((,bintype (bintype (field-type-name (btobj-field ,obj)))))
+	 ,@(loop :for field :in fields :for spec = (field-spec field) :collect
+	      `(let ((,field-obj (make-instance ',(spec-object-type (field-spec field)) :parent ,obj
+				  :bintype ,bintype :field (field ,bintype `,(field-name field))
+				  :value-fn (lambda (offset) ,(field-spec field))))
+		     ,field-instance)
+		 ,(cond ((spec-ordered-p spec)
+			 (let ((contained-spec (spec-ordered-contained-spec spec)))
+			   `(setf (btordered-stride ,field-obj) ,(spec-ordered-stride spec)
+				  (btordered-dimension ,field-obj) ,(spec-ordered-dimension spec)
+				  (btordered-contained-type ,field-obj) ',(spec-object-type contained-spec)
+				  (btordered-sub-value-fn ,field-obj) (lambda (offset) ,contained-spec))))
+			((spec-structured-p spec)
+			 `(let ((field-bintype (bintype ',(spec-structured-type spec))))
+			    (setf (btstructured-bintype ,field-obj) field-bintype
+				  ,field-instance (funcall (bintype-instantiator field-bintype))
+				  (btobj-value ,field-obj) ,field-instance))))
+		 (setf (btobj-offset ,field-obj) ,offset
+		       ,offset (postoffsetify .field-instance ,field-obj ,offset)
+		       (cref ,obj ',(field-name field)) ,field-obj)))
+	 (setf (btobj-postoffset ,obj) ,offset)))))
+
+;; The proper way is to make arrays specializable by their location in the bintype hierarchy
+;; The dispatch matches CLOS badly. Let's face it. But let's get it to a workable state first.
+;; How VALUE happens?
+;; How array subs are traversed?
+
+(defgeneric unserialize (btobject)
+  (:method ((obj btleaf))
+    (setf (btobj-value obj) (funcall (btobj-value-fn obj) (btobj-offset obj))))
+  (:method ((obj btordered))
+    ;; array type is too weakly specified
+    (let ((array (make-array (btordered-dimension field-obj))))
+      (loop :for i :from 0 :below (btordered-dimension field-obj)
+	    :for suboffset :from (btobj-offset obj) :by (btordered-stride obj) :do
+	 (setf (aref array i)
+	       (funcall (btordered-sub-value-fn field-obj) suboffset)))
+      (setf (btobj-value obj) array)))
+  (:method ((obj btstructured))
+    (let* ((bintype (btstructured-bintype obj))
+	   (offset (btobj-offset obj)))
+      (loop :for field :in (bintype-fields bintype)
+            :for field-obj = (cref obj (field-name field)) :do
+	 (funcall (field-setter field) (unserialize obj offset) (btobj-value obj))
+	 (setf offset (btobj-postoffset field-obj)))
+      (btobj-value obj))))
+
+(defun sub (obj selector)
+  (declare (type btcontainer obj))
+  (unless (btcontainer-paved-p obj)
+    (postoffsetify obj (btobj-offset obj)))
+  (cref obj selector))
+
+(defun val (obj)
+  (or (btobj-value) (unserialize obj)))
+
+(defun parse (bintype array &optional (offset 0))
+  (let* ((instance (funcall (bintype-instantiator bintype)))
+	 (btstructured (make-instance 'btstructured :bintype bintype)))
+    (declare (dynamic-extent btstructured))
+    (postoffsetify instance obj offset)
+    (unserialize btstructured)))
+
 (defmacro defbintype (name docstring &body body)
-  (let* ((fieldspecs (loop :for (sem field-name spec-form . rest) :in body
-			:collect (make-fieldspec :sem sem :name field-name :spec-form spec-form
-						 :ext rest :accessor (format-symbol (symbol-package name) "~A-~A" name field-name))))
-	 (producing-fieldspecs (remove-if-not #'fieldspec-outputs-field-p fieldspecs)))
-    `(let* ((fieldspecs ',fieldspecs)
-	    (producing-fieldspecs (remove-if-not #'fieldspec-outputs-field-p fieldspecs))
-	    (bintype (make-bintype :name ',name :documentation ,docstring :fieldspecs fieldspecs)))
-       (setf (gethash ',name *types*) bintype)
-       (defstruct ,name ,@(mapcar #'fieldspec-output-field producing-fieldspecs))
-       (loop :for fieldspec :in producing-fieldspecs
-	  :do (setf (fieldspec-getter fieldspec) (fdefinition (fieldspec-accessor fieldspec))
-		    (fieldspec-setter fieldspec) (fdefinition `(setf ,(fieldspec-accessor fieldspec)))))
-       (setf (bintype-maker bintype)
-	     (fdefinition ',(format-symbol (symbol-package name) "MAKE-~A" name))
-	     (bintype-parser bintype) ,(output-parser-lambda fieldspecs)))))
+  (let* ((fields (loop :for (sem field-name spec . rest) :in body :collect
+		    (make-field :sem sem :name field-name :spec spec :ext rest :type-name name)))
+	 (producing-fields (remove-if-not #'field-spec-outputs-field-p fields)))
+    
+    `(progn
+       (setf (gethash ',name *types*)
+	     (make-bintype :name ',name :documentation ,docstring :fields ',fields))
+       ,(output-type-definition name producing-fields)
+       (let* ((bintype (bintype ',name))
+	      (fields (bintype-fields bintype))
+	      (producing-fields (remove-if-not #'field-spec-outputs-field-p fields)))
+	 ,(output-field-accessor-registration name 'producing-fields)
+	 ,(output-bintype-instantiator-registration 'bintype)
+	 ,(output-postoffsetify-method name fields)))))
 
 (defun export-bintype-accessors (bintype)
-  (export (list* (bintype-name bintype)
-		 (loop :for fieldspec :in (bintype-fieldspecs bintype)
-		    :when (fieldspec-getter fieldspec)
-		    :collect (format-symbol t "~A-~A"
-					    (bintype-name bintype)
-					    (fieldspec-name fieldspec))))))
+  (export (list* (bintype-name bintype) (mapcar #'field-accessor-name (bintype-fields bintype)))))
+
 ;; types of object parametrisation:
 ;;   - offset -- for out-of-stream objects
 ;;   - count, stride -- for ordered containers
 ;;   - seek -- pads, affecting stream and therefore all further objects in named container
-;; completion dependency -- sum of:
-;;   - offset and other possible parametrisation dependencies
-;;   - completion dependencies of explicitly specified depended-upon objects (for dependent objects)
-;;   - completion dependencies of child leaves and containers (for containers)
-;; offset dependency -- one of:
-;;   - flow-implied -- immediate resolution
 
 (defbintype phdr
     "ELF program header"
@@ -297,6 +336,24 @@
   (:imm	info	  (plain :unsigned-byte-32))
   (:imm	addralign (plain :unsigned-byte-32))
   (:imm	entsize   (plain :unsigned-byte-32)))
+
+;; leaf-width
+;; object-type     ordered, structured, leaf
+;; ordered-p, ordered-contained-spec, ordered-stride, ordered-dimension
+;; structured-p, structured-type
+(defbintype ehdr
+    "ELF header"
+  (match id-magic	(sequence :unsigned-byte-8 :count 4 :stride 1 :format 'list)
+	 '(#x7f #x45 #x4c #x46))
+  (enum  id-class	:unsigned-byte-8
+	 '((#x0 :none) (#x1 :32) (#x2 :64)))
+  (enum  id-data	:unsigned-byte-8	'((#x0 :none) 
+						  (#x1 (set-endianness :little-endian) :lsb)
+						  (#x2 (set-endianness :big-endian) :msb)))
+  (plain id-version	:unsigned-byte-8)
+  (seek	 nil	1)
+  
+
 
 (defbintype ehdr
     "ELF header"
@@ -342,11 +399,11 @@
 			   (sequence 'shdr :count (sref 'shnum) :format 'list
 					   :stride (sref 'shentsize)))))
 
-(mapc (compose #'export-bintype-accessors #'bintype) '(ehdr phdr shdr))
+;; (mapc (compose #'export-bintype-accessors #'bintype) '(ehdr phdr shdr))
 
-;(let ((test-file-name "/bin/ls"))
-;  (format t "testing ~S:~%~S~%"
-;	  test-file-name
-;	  (with-open-file (str test-file-name :element-type '(unsigned-byte 8))
-;	    (let ((seq (captured-stream:make-captured-stream str)))
-;	      (parse-binary seq (bintype 'ehdr))))))
+;; (let ((test-file-name "/bin/ls"))
+;;   (format t "testing ~S:~%~S~%"
+;; 	  test-file-name
+;; 	  (with-open-file (str test-file-name :element-type '(unsigned-byte 8))
+;; 	    (let ((seq (captured-stream:make-captured-stream str)))
+;; 	      (parse-binary seq (bintype 'ehdr))))))
