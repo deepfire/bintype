@@ -9,10 +9,40 @@
 (defvar *types* (make-hash-table))
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
-  (defclass instance ()
-    ((parent :accessor instance-parent)
-     (subsets :accessor instance-subsets)
-     (data :accessor instance-data)))
+  (defclass depobj ()
+    ((deps :accessor depobj-deps :initarg :deps :type list :initform nil)))
+
+  (defun depend (o dep)
+    (declare (type depobj o dep))
+    (push dep (depobj-deps o)))
+
+  (defclass btobj (depobj)
+    ((instance :accessor btobj-instance :initarg :instance)))
+
+  (defclass btcontainer (btobj)
+    ((childs :accessor btcontainer-childs :initarg :childs)))
+
+  (defclass btsequence (btcontainer)
+    ())
+
+  (defclass btstruct (btcontainer)
+    ())
+
+  (defgeneric cref (container spec)
+    (:method ((btcontainer btsequence) (spec integer))
+      (elt (btcontainer-childs btcontainer) spec))
+    (:method ((btcontainer btstruct) (spec symbol))
+      (cadr (assoc spec (btcontainer-childs btcontainer)))))
+
+  (defgeneric (setf cref) (val container spec)
+    (:method (val (btcontainer btsequence) (spec integer))
+      (setf (elt (btcontainer-childs btcontainer) spec) val))
+    (:method (val (btcontainer btstruct) (spec symbol))
+      (if-let ((acell (assoc spec (btcontainer-childs btcontainer))))
+	      (setf (cadr acell) val))))
+
+  (defclass btleaf (btobj)
+    ())
 
   (defstruct fieldspec
     name sem spec-form ext accessor getter setter)
@@ -41,6 +71,25 @@
   (defun fieldspec (bintype name)
     (find name (bintype-fieldspecs bintype) :key #'fieldspec-name))
 
+  (defun fieldspec-outputs-field-p (fieldspec)
+    (not (member (fieldspec-sem fieldspec) '(:mag :pad))))
+
+  (defun fieldspec-output-field (fieldspec)
+    (let ((*break-on-signals* t))
+      `(,(fieldspec-name fieldspec) nil :type
+	 (or null
+	     ,(eval `(macrolet ((zero-terminate-string (first &rest rest) (declare (ignore rest)) first)
+				(out-of-stream-absolute (offset form) (declare (ignore offset)) form)
+				(sequence (element-type &key format &allow-other-keys)
+				  (declare (ignore element-type))
+				  (ecase (second format) (vector ''simple-vector) (list ''list)))
+				(plain (type)
+				  `',(simple-typespec-lisp-type type))
+				(enum (type spec)
+				  (declare (ignore type spec))
+				  ''keyword))
+		       ,(fieldspec-spec-form fieldspec)))))))
+
   (defun simple-typespec-lisp-type (typespec)
     (cond ((keywordp typespec)
 	   (ecase typespec
@@ -52,7 +101,100 @@
 	     (error "Reference to an inexistent binary type ~S." typespec))
 	   typespec)
 	  (t
-	   (error "Bad type specification: ~S." typespec)))))
+	   (error "Bad type specification: ~S." typespec))))
+
+
+  (defun output-parser-lambda (fieldspecs)
+    "Output a bintype's parser lambda within a lexenv having BINTYPE and FIELDSPECS bound."
+    `(lambda (sequence bintype &optional (offset 0) parent endianness)
+       (declare (ignorable parent))
+       (let* ((instance (funcall (bintype-maker bintype)))
+	      (point offset) word16-accessor word32-accessor)
+	 (declare (special point))
+	 (labels ((set-endianness (new-endianness)
+		    (setf (values word16-accessor word32-accessor)
+			  (case new-endianness
+			    (:little-endian (values #'sequence-word16-le #'sequence-word32-le))
+			    (:big-endian    (values #'sequence-word16-be #'sequence-word32-be)))))
+		  (word16-accessor (sequence offset)
+		    (unless word16-accessor
+		      (error "Attempt to use endian-dependent access with no endianness specified."))
+		    (funcall word16-accessor sequence offset))
+		  (word32-accessor (sequence offset)
+		    (unless word32-accessor
+		      (error "Attempt to use endian-dependent access with no endianness specified."))
+		    (funcall word32-accessor sequence offset))
+		  (sref (slot-name)
+		    (funcall (fieldspec-getter (fieldspec bintype slot-name)) instance))
+		  (simple-access (seq offset typespec)
+		    (declare (type sequence seq) (type integer offset))
+		    (cond ((keywordp typespec)
+			   (ecase typespec
+			     (:unsigned-byte-8 (values (elt seq offset) (1+ offset)))
+			     (:unsigned-byte-16 (values (word16-accessor seq offset) (+ 2 offset)))
+			     (:unsigned-byte-32 (values (word32-accessor seq offset) (+ 4 offset)))))
+			  ((symbolp typespec)
+			   (parse-binary sequence (bintype typespec) offset parent endianness))
+			  (t (error "Botched typespec: ~S." typespec))))
+		  (seek (typespec)
+		    (values nil (+ point typespec)))
+		  (plain (typespec)
+		    (simple-access sequence point typespec))
+		  (enum (typespec alist)
+		    (multiple-value-bind (value new-offset) (simple-access sequence point typespec)
+		      (let ((match (cadr (assoc value alist :test #'=))))
+			(unless match
+			  (error "Got ~X at offset ~X, instead of an expected a value matching the enumerated set ~S."
+				 value point alist))
+			(let ((match (if (consp match) match (list match))))
+			  (dolist (op (rest match))
+			    (ecase (first op)
+			      (set-endianness
+			       (setf endianness (second op))
+			       (set-endianness (second op)))))
+			  (values (first match) new-offset)))))
+		  (sequence (typespec &key count stride (format 'list))
+		    (declare (dynamic-extent point))
+		    (values
+		     (ecase format
+		       (vector (loop :with vector = (make-array count)
+				     :for i :from 0 :below count
+				     :for cur :from point :by stride
+			          :do (setf (svref vector i) (simple-access sequence cur typespec))
+				  :finally (return vector)))
+		       (list (loop :for i :from 0 :below count
+				   :for cur :from point :by stride
+			        :collect (simple-access sequence cur typespec))))
+		     (+ point (* count stride)))))
+	   (declare (ignorable #'seek #'sref))
+	   (macrolet ((out-of-stream-absolute (offset form)
+			`(values (let ((point ,offset))
+				   (declare (special point))
+				   ,form)
+				 point))
+		      (zero-terminate-string (vector-form)
+			(with-gensyms (vector offset) 
+			  `(multiple-value-bind (,vector ,offset) ,vector-form
+			     (values
+			      (subseq ,vector 0 (min (1- (length ,vector)) (position 0 ,vector)))
+			      ,offset)))))
+	     (set-endianness endianness)
+	     ,@(loop :for fieldspec :in fieldspecs :collect
+		  `(multiple-value-bind (value new-offset) ,(fieldspec-spec-form fieldspec)
+		     (declare (ignorable value))
+		     ,(ecase (fieldspec-sem fieldspec)
+			     (:pad)
+			     (:mag 
+			      `(let ((magic ,(first (fieldspec-ext fieldspec))))
+				 (when (funcall (if (typep value 'sequence)
+						    #'mismatch (compose #'not #'=))
+						value magic)
+				   (error "~S, offset ~S: expected ~S, got ~S."
+					  (bintype-name bintype) point magic value))))
+			     ((:dep :imm :seq)
+			      `(setf (,(fieldspec-accessor fieldspec) instance) value)))
+		     (setf point new-offset)))
+	     instance))))))
 
 (defun sequence-word16-le (seq offset)
   (logior (ash (elt seq (+ offset 0)) 0)
@@ -77,116 +219,6 @@
 (defun parse-binary (sequence bintype &optional (offset 0) parent endianness)
   (declare (type sequence sequence) (type bintype bintype) (integer offset))
   (funcall (bintype-parser bintype) sequence bintype offset parent endianness))
-
-(defun output-parser-lambda (fieldspecs)
-  "Output a bintype's parser lambda within a lexenv having BINTYPE and FIELDSPECS bound."
-  `(lambda (sequence bintype &optional (offset 0) parent endianness)
-     (declare (ignorable parent))
-     (let* ((instance (funcall (bintype-maker bintype)))
-	    (point offset) word16-accessor word32-accessor)
-       (declare (special point))
-       (labels ((set-endianness (new-endianness)
-		  (setf (values word16-accessor word32-accessor)
-			(case new-endianness
-			  (:little-endian (values #'sequence-word16-le #'sequence-word32-le))
-			  (:big-endian    (values #'sequence-word16-be #'sequence-word32-be)))))
-		(word16-accessor (sequence offset)
-		  (unless word16-accessor
-		    (error "Attempt to use endian-dependent access with no endianness specified."))
-		  (funcall word16-accessor sequence offset))
-		(word32-accessor (sequence offset)
-		  (unless word32-accessor
-		    (error "Attempt to use endian-dependent access with no endianness specified."))
-		  (funcall word32-accessor sequence offset))
-		(sref (slot-name)
-		  (funcall (fieldspec-getter (fieldspec bintype slot-name)) instance))
-		(simple-access (seq offset typespec)
-		  (declare (type sequence seq) (type integer offset))
-		  (cond	((keywordp typespec)
-			 (ecase typespec
-			   (:unsigned-byte-8 (values (elt seq offset) (1+ offset)))
-			   (:unsigned-byte-16 (values (word16-accessor seq offset) (+ 2 offset)))
-			   (:unsigned-byte-32 (values (word32-accessor seq offset) (+ 4 offset)))))
-			((symbolp typespec)
-			 (parse-binary sequence (bintype typespec) offset parent endianness))
-			(t (error "Botched typespec: ~S." typespec))))
-		(seek (typespec)
-		  (values nil (+ point typespec)))
-		(plain (typespec)
-		  (simple-access sequence point typespec))
-		(enum (typespec alist)
-		  (multiple-value-bind (value new-offset) (simple-access sequence point typespec)
-		    (let ((match (cadr (assoc value alist :test #'=))))
-		      (unless match
-			(error "Got ~X at offset ~X, instead of an expected a value matching the enumerated set ~S."
-			       value point alist))
-		      (let ((match (if (consp match) match (list match))))
-			(dolist (op (rest match))
-			  (ecase (first op)
-			    (set-endianness
-			     (setf endianness (second op))
-			     (set-endianness (second op)))))
-			(values (first match) new-offset)))))
-		(sequence (typespec &key count stride (format 'list))
-		  (declare (dynamic-extent point))
-		  (values
-		   (ecase format
-		     (vector (loop :with vector = (make-array count)
-				   :for i :from 0 :below count
-				   :for cur :from point :by stride
-			        :do (setf (svref vector i) (simple-access sequence cur typespec))
-				:finally (return vector)))
-		     (list (loop :for i :from 0 :below count
-				 :for cur :from point :by stride
-			      :collect (simple-access sequence cur typespec))))
-		   (+ point (* count stride)))))
-	 (macrolet ((out-of-stream-absolute (offset form)
-		      `(values (let ((point ,offset))
-				 (declare (special point))
-				 ,form)
-			       point))
-		    (zero-terminate-string (vector-form)
-		      (with-gensyms (vector offset) 
-			`(multiple-value-bind (,vector ,offset) ,vector-form
-			   (values
-			    (subseq ,vector 0 (min (1- (length ,vector)) (position 0 ,vector)))
-			    ,offset)))))
-	   (set-endianness endianness)
-	   ,@(loop :for fieldspec :in fieldspecs :collect
-		`(multiple-value-bind (value new-offset) ,(fieldspec-spec-form fieldspec)
-		   (declare (ignorable value))
-		   ,(ecase (fieldspec-sem fieldspec)
-			   (:pad)
-			   (:mag 
-			    `(let ((magic ,(first (fieldspec-ext fieldspec))))
-			       (when (funcall (if (typep value 'sequence)
-						  #'mismatch (compose #'not #'=))
-					      value magic)
-				 (error "~S, offset ~S: expected ~S, got ~S."
-					(bintype-name bintype) point magic value))))
-			   ((:dep :imm :seq)
-			    `(setf (,(fieldspec-accessor fieldspec) instance) value)))
-		   (setf point new-offset)))
-	   instance)))))
-
-(defun fieldspec-outputs-field-p (fieldspec)
-  (not (member (fieldspec-sem fieldspec) '(:mag :pad))))
-
-(defun fieldspec-output-field (fieldspec)
-  (let ((*break-on-signals* t))
-  `(,(fieldspec-name fieldspec) nil :type
-     (or null
-	 ,(eval `(macrolet ((zero-terminate-string (first &rest rest) (declare (ignore rest)) first)
-			    (out-of-stream-absolute (offset form) (declare (ignore offset)) form)
-			    (sequence (element-type &key format &allow-other-keys)
-			      (declare (ignore element-type))
-			      (ecase (second format) (vector ''simple-vector) (list ''list)))
-			    (plain (type)
-			      `',(simple-typespec-lisp-type type))
-			    (enum (type spec)
-			      (declare (ignore type spec))
-			      ''keyword))
-		   ,(fieldspec-spec-form fieldspec)))))))
 	   
 (defmacro defbintype (name docstring &body body)
   (let* ((fieldspecs (loop :for (sem field-name spec-form . rest) :in body
@@ -212,6 +244,16 @@
 		    :collect (format-symbol t "~A-~A"
 					    (bintype-name bintype)
 					    (fieldspec-name fieldspec))))))
+;; types of object parametrisation:
+;;   - offset -- for out-of-stream objects
+;;   - count, stride -- for ordered containers
+;;   - seek -- pads, affecting stream and therefore all further objects in named container
+;; completion dependency -- sum of:
+;;   - offset and other possible parametrisation dependencies
+;;   - completion dependencies of explicitly specified depended-upon objects (for dependent objects)
+;;   - completion dependencies of child leaves and containers (for containers)
+;; offset dependency -- one of:
+;;   - flow-implied -- immediate resolution
 
 (defbintype phdr
     "ELF program header"
@@ -230,21 +272,12 @@
   (:imm	flags	(plain :unsigned-byte-32))
   (:imm	align	(plain :unsigned-byte-32)))
 
-;; aspects:
-;;  1 in-flow?
-;;  1.1 yes -- effect on the flow
-;;  1.2 no -- offset
-;;  2 storage type
-;;  3 final type
-;;  4 dependency
-;;  4.1 offset in the dependency
-
 (defbintype shdr
     "ELF section header"
   (:dep	name	  ;(plain :null-terminated-string)		;; final type
 	          ;(ref (parent) 'shdr (ref (parent) 'shstrndx))	;; dependency
-		  (plain :unsigned-byte-32))
-		  ;)
+		  (plain :unsigned-byte-32)
+		  )
   (:imm	type	  (enum :unsigned-byte-32 '((#x0 :sht-null) (#x1 :sht-progbits) (#x2 :sht-symtab)
 					    (#x3 :sht-strtab) (#x4 :sht-rela) (#x5 :sht-hash)
 					    (#x6 :sht-dynamic) (#x7 :sht-note) (#x8 :sht-nobits)
@@ -311,9 +344,9 @@
 
 (mapc (compose #'export-bintype-accessors #'bintype) '(ehdr phdr shdr))
 
-;; (let ((test-file-name "/bin/ls"))
-;;   (format t "testing ~S:~%~S~%"
-;; 	  test-file-name
-;; 	  (with-open-file (str test-file-name :element-type '(unsigned-byte 8))
-;; 	    (let ((seq (captured-stream:make-captured-stream str)))
-;; 	      (parse-binary seq (bintype 'ehdr))))))
+;(let ((test-file-name "/bin/ls"))
+;  (format t "testing ~S:~%~S~%"
+;	  test-file-name
+;	  (with-open-file (str test-file-name :element-type '(unsigned-byte 8))
+;	    (let ((seq (captured-stream:make-captured-stream str)))
+;	      (parse-binary seq (bintype 'ehdr))))))
