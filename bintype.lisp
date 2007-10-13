@@ -50,10 +50,12 @@
   (defstruct field
     name	;; as appears in the resulting type
     type-name	;; name of the containing type
-    sem		;; parsed pieces
-    spec	;; parsed pieces
-    ext		;; parsed pieces
-    setter accessor-name type parser-class)
+    op
+    type
+    params
+    ;; deduced
+    object-type	;; btleaf, btordered, btstructured
+    setter accessor-name type)
 
   (defmethod make-load-form ((field field) &optional env)
     (make-load-form-saving-slots field :environment env))
@@ -145,15 +147,6 @@
 		      (enum (&rest rest) `(simple-typespec-width ,(first rest))))
 	     ,spec)))
 
-  (defun spec-deduce-parser-class (spec)
-    (eval `(flet ((zero-terminate-string (&rest rest)  (declare (ignorable rest)) 'btobj)
-		  (out-of-stream-absolute (&rest rest) (declare (ignorable rest)) (second rest))
-		  (sequence (&rest rest)	       (declare (ignorable rest)) 'btsequence)
-		  (plain (&rest rest)		       (declare (ignorable rest)) 'btobj)
-		  (seek (&rest rest)		       (declare (ignorable rest)) 'btobj)
-		  (enum (&rest rest)		       (declare (ignorable rest)) 'btobj))
-	     ,spec)))
-
 (defun sequence-word16-le (seq offset)
   (logior (ash (elt seq (+ offset 0)) 0)
 	  (ash (elt seq (+ offset 1)) 8)))
@@ -194,6 +187,7 @@
   (:method ((instance null) (obj btleaf) incoming)
     (setf (btobj-postoffset obj) (+ incoming (spec-leaf-width (field-spec (btobj-field obj))))))
   (:method ((instance null) (obj btordered) incoming)
+    "Allocate child instances, with postoffsets calculated trivially, thanks to vector goodness."
     (setf (btobj-postoffset obj)
 	  (+ incoming (loop :for i :from 0 :below (btordered-dimension obj)
 			    :for offset :from incoming :by (btordered-stride obj)
@@ -205,11 +199,11 @@
 		         :finally (return (* (btordered-stride obj) (btordered-dimension obj))))))))
 
 (defun output-postoffsetify-method (name fields)
-  (with-gensyms (instance obj offset bintype obj field-obj field-instance)
+  (with-gensyms (bintype instance obj offset obj field-obj field-instance)
     `(defmethod postoffsetify ((,instance ,name) (,obj btstructured) ,offset)
        (let ((,bintype (bintype (field-type-name (btobj-field ,obj)))))
-	 ,@(loop :for field :in fields :for spec = (field-spec field) :collect
-	      `(let ((,field-obj (make-instance ',(spec-object-type (field-spec field)) :parent ,obj
+	 ,@(loop :for field :in fields :for type = (field-type field) :collect
+	      `(let ((,field-obj (make-instance ',(field-object-type field) :parent ,obj
 				  :bintype ,bintype :field (field ,bintype `,(field-name field))
 				  :value-fn (lambda (offset) ,(field-spec field))))
 		     ,field-instance)
@@ -270,50 +264,67 @@
     (postoffsetify instance obj offset)
     (unserialize btstructured)))
 
-(defmacro defbintype (name docstring &body body)
-  (let* ((fields (loop :for (sem field-name spec . rest) :in body :collect
-		    (make-field :sem sem :name field-name :spec spec :ext rest :type-name name)))
+(deftype qualified-specifier () `(member btleaf btordered btstructured))
+(deftype unqualified-primitive-specifier () `(member :unsigned-byte-8 :unsigned-byte-16 :unsigned-byte-32))
+
+(defun type-field-object-type (type-specifier)
+  (let ((preprocessed (typecase type-specifier
+			(cons
+			 (unless (>= (length type-specifier) 2)
+			   (error "Malformed type specification: ~S" type-specifier))
+			 (eval `(macrolet ((zero-terminate-string (&rest rest)	(declare (ignorable rest)) 'btleaf)
+					   (out-of-stream-absolute (&rest rest)	(declare (ignorable rest)) (second rest))
+					   (sequence (&rest rest)		(declare (ignorable rest)) 'btordered))
+				  ,type-specifier)))
+			(t type))))
+    (etypecase preprocessed
+      (qualified-specifier preprocessed)
+      (unqualified-primitive-specifier 'btleaf)
+      (symbol 'btstructured))))
+
+(defmacro defbintype (type-name &body f)
+  (let* ((documentation (cadr (assoc :documentation f)))
+	 (raw-fields (cadr (assoc :fields f)))
+	 (fields (loop :for (op name type . params) :in raw-fields :collect
+		    (make-field :op op :name name :type type :params params :type-name type-name
+				:object-type (type-field-object-type type))))
 	 (producing-fields (remove-if-not #'field-spec-outputs-field-p fields)))
-    
     `(progn
-       (setf (gethash ',name *types*)
-	     (make-bintype :name ',name :documentation ,docstring :fields ',fields))
-       ,(output-type-definition name producing-fields)
-       (let* ((bintype (bintype ',name))
+       (setf (gethash ',type-name *types*)
+	     (make-bintype :name ',type-name :documentation ,documentation :fields ',fields))
+       ,(output-type-definition type-name producing-fields)
+       (let* ((bintype (bintype ',type-name))
 	      (fields (bintype-fields bintype))
 	      (producing-fields (remove-if-not #'field-spec-outputs-field-p fields)))
-	 ,(output-field-accessor-registration name 'producing-fields)
+	 ,(output-field-accessor-registration type-name 'producing-fields)
 	 ,(output-bintype-instantiator-registration 'bintype)
-	 ,(output-postoffsetify-method name fields)))))
+	 ,(output-postoffsetify-method type-name fields)))))
 
 (defun export-bintype-accessors (bintype)
   (export (list* (bintype-name bintype) (mapcar #'field-accessor-name (bintype-fields bintype)))))
 
-;; types of object parametrisation:
-;;   - offset -- for out-of-stream objects
-;;   - count, stride -- for ordered containers
-;;   - seek -- pads, affecting stream and therefore all further objects in named container
-
 (defbintype phdr
-    "ELF program header"
-  (match type		:unsigned-byte-32
+  (:documentation "ELF program header")
+  (:fields
+   (match type		:unsigned-byte-32
 	 		((#x0 :pt-null) (#x1 :pt-load) (#x2 :pt-dynamic) (#x3 :pt-interp)
 			 (#x4 :pt-note) (#x5 :pt-shlib) (#x6 :pt-phdr) (#x7 :pt-tls)
 			 (#x6474e550 :pt-gnu-eh-frame) (#x6474e551 :pt-gnu-stack)
 			 (#x6474e552 :pt-gnu-relro)
 			 (#x60000000 :pt-loos) (#x6fffffff :pt-hios)
 			 (#x70000000 :pt-loproc) (#x7fffffff :pt-hiproc)))
-  (plain offt		:unsigned-byte-32)
-  (plain vaddr		:unsigned-byte-32)
-  (plain paddr		:unsigned-byte-32)
-  (plain filesz		:unsigned-byte-32)
-  (plain memsz		:unsigned-byte-32)
-  (plain flags		:unsigned-byte-32)
-  (plain align		:unsigned-byte-32))
+   (value offt		:unsigned-byte-32)
+   (value vaddr		:unsigned-byte-32)
+   (value paddr		:unsigned-byte-32)
+   (value filesz	:unsigned-byte-32)
+   (value memsz		:unsigned-byte-32)
+   (value flags		:unsigned-byte-32)
+   (value align		:unsigned-byte-32))
 
 ;; (defbintype shdr
-;;     "ELF section header"
-;;   (plain	  ;(plain :null-terminated-string)		;; final type
+;;   (:documentation "ELF section header")
+;;   (:fields
+;;   (value	  ;(value :null-terminated-string)		;; final type
 ;; 	          ;(ref (parent) 'shdr (ref (parent) 'shstrndx))	;; dependency
 ;; 			:unsigned-byte-32)
 ;;   (match type		:unsigned-byte-32
@@ -328,21 +339,22 @@
 ;; 			 (#x6fffffff :sht-gnu-versym) (#x70000000 :sht-loproc)
 ;; 			 (#x7fffffff :sht-hiproc) (#x80000000 :sht-louser)
 ;; 			 (#xffffffff :sht-hiuser)))
-;;   (plain flags		:unsigned-byte-32)
-;;   (plain addr		:unsigned-byte-32)
-;;   (plain offt		:unsigned-byte-32)
-;;   (plain size		:unsigned-byte-32)
-;;   (plain link		:unsigned-byte-32)
-;;   (plain info		:unsigned-byte-32)
-;;   (plain addralign	:unsigned-byte-32)
-;;   (plain entsize	:unsigned-byte-32))
+;;   (value flags		:unsigned-byte-32)
+;;   (value addr		:unsigned-byte-32)
+;;   (value offt		:unsigned-byte-32)
+;;   (value size		:unsigned-byte-32)
+;;   (value link		:unsigned-byte-32)
+;;   (value info		:unsigned-byte-32)
+;;   (value addralign	:unsigned-byte-32)
+;;   (value entsize	:unsigned-byte-32)))
 
 ;; ;; leaf-width
 ;; ;; object-type     ordered, structured, leaf
 ;; ;; ordered-p, ordered-contained-spec, ordered-stride, ordered-dimension
 ;; ;; structured-p, structured-type
 ;; (defbintype ehdr
-;;     "ELF header"
+;;   (:documentation "ELF header")
+;;   (:fields
 ;;   (match id-magic	(sequence :unsigned-byte-8 :count 4 :stride 1 :format 'list)
 ;; 	 		(((#x7f #x45 #x4c #x46) t)))
 ;;   (match id-class	:unsigned-byte-8
@@ -351,9 +363,9 @@
 ;; 	 		((#x0 :none)
 ;; 			 (#x1 (set-endianness :little-endian) :lsb)
 ;; 			 (#x2 (set-endianness :big-endian) :msb)))
-;;   (plain id-version	:unsigned-byte-8)
+;;   (value id-version	:unsigned-byte-8)
 ;;   (seek	 nil		1)
-;;   (plain id-name	(sequence :unsigned-byte-8 :count 8 :stride 1 :format 'vector))
+;;   (value id-name	(sequence :unsigned-byte-8 :count 8 :stride 1 :format 'vector))
 ;;   (match type		:unsigned-byte-16
 ;; 			((#x0 :et-none) (#x1 :et-rel) (#x2 :et-exec) (#x3 :et-dyn)
 ;; 			 (#x4 :et-core) (#xff00 :et-loproc) (#xffff :et-hiproc)))
@@ -371,22 +383,22 @@
 ;; 			 (51 :em-mips-x) (52 :em-coldfire) (53 :em-68hc12)))
 ;;   (match version	:unsigned-byte-32
 ;; 			((0 :none) (1 :1)))
-;;   (plain entry		:unsigned-byte-32)
-;;   (plain phoff		:unsigned-byte-32)
-;;   (plain shoff		:unsigned-byte-32)
-;;   (plain flags		:unsigned-byte-32)
-;;   (plain ehsize		:unsigned-byte-16)
-;;   (plain phentsize	:unsigned-byte-16)
-;;   (plain phnum		:unsigned-byte-16)
-;;   (plain shentsize	:unsigned-byte-16)
-;;   (plain shnum		:unsigned-byte-16)
-;;   (plain shstrndx	:unsigned-byte-16)
-;;   (cont  phdrs		(out-of-stream-absolute (sref 'phoff)
+;;   (value entry		:unsigned-byte-32)
+;;   (value phoff		:unsigned-byte-32)
+;;   (value shoff		:unsigned-byte-32)
+;;   (value flags		:unsigned-byte-32)
+;;   (value ehsize		:unsigned-byte-16)
+;;   (value phentsize	:unsigned-byte-16)
+;;   (value phnum		:unsigned-byte-16)
+;;   (value shentsize	:unsigned-byte-16)
+;;   (value shnum		:unsigned-byte-16)
+;;   (value shstrndx	:unsigned-byte-16)
+;;   (value phdrs	(out-of-stream-absolute (sref 'phoff)
 ;; 			   (sequence 'phdr :count (sref 'phnum) :format 'list
 ;; 					   :stride (sref 'phentsize))))
-;;   (cont  shdrs		(out-of-stream-absolute (sref 'shoff)
+;;   (value shdrs	(out-of-stream-absolute (sref 'shoff)
 ;; 			   (sequence 'shdr :count (sref 'shnum) :format 'list
-;; 					   :stride (sref 'shentsize)))))
+;; 					   :stride (sref 'shentsize))))))
 
 ;; (mapc (compose #'export-bintype-accessors #'bintype) '(ehdr phdr shdr))
 
