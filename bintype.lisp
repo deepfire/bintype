@@ -6,6 +6,21 @@
 
 (in-package :bintype)
 
+;; This macro belongs to the wider world.
+(defmacro define-evaluation-domain (domain-name (&rest evaluation-result-vars))
+  (with-gensyms (table-name name lambda-list type body)
+    `(progn
+       (defvar ,table-name (make-hash-table))
+       
+       (defmacro ,(format-symbol (symbol-package domain-name) "DEFINE-~S" domain-name) (,name ,lambda-list &body ,body)
+	 `(setf (gethash ',,domain-name ,,table-name)
+		(lambda ,,lambda-list ,@,body)))
+       
+       (defmacro ,(format-symbol (symbol-package domain-name) "BIND-~S" domain-name) ((,@evaluation-result-vars) ,type &body ,body)
+	 "Given a parser op invocation, deliver the appropriately specialised op 'guts'."
+	 `(multiple-value-bind (,,@evaluation-result-vars) (apply (gethash ,(first ,type) ,,table-name) ,(rest ,type))
+	    ,@,body)))))
+
 (defvar *bintypes* (make-hash-table))
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
@@ -49,14 +64,17 @@
     (:method (val (btcontainer btstruct) (sel symbol))
       (setf (gethash sel (btcontainer-childs btcontainer)) val)))
 
-  (defvar *primitive-types* (make-hash-table))
-  
-  (defun primitive-type-lambda (name)
-    (gethash name *primitive-types*))
+  (define-evaluation-domain parser-op (in-stream-p outputs-field-p))
 
-  (defmacro define-primitive-type (name lambda-list &body body)
-    `(setf (gethash ,name *primitive-types*)
-	   `(lambda ,lambda-list ,@body)))
+  (define-parser-op match (name type values &key ignore out-of-stream-offset)
+    (declare (type (or integer null) out-of-stream-offset))
+    (values (null out-of-stream-offset) (not ignore)))
+
+  (define-parser-op value (name type &key ignore out-of-stream-offset)
+    (declare (type (or integer null) out-of-stream-offset))
+    (values (null out-of-stream-offset) (not ignore)))
+
+  (define-evaluation-domain primitive-type (subbttype subcltype subwidth subreader))
 
   (defun generic-u8-reader (parse-context vector offset)
     (declare (ignore parse-context))
@@ -85,12 +103,6 @@
 	    (lambda (parse-context vector offset)
 	      (declare (ignore parse-context))
 	      (consume-zero-terminated-string vector string offset))))
-
-  (defmacro bind-primitive-type ((subbytype subcltype subwidth subreader) type &body body)
-    "Given a type specification, deliver the appropriately specialised type 'guts'."
-    `(multiple-value-bind (,subbttype ,subcltype ,subwidth ,subreader)
-	 (apply (primitive-type-lambda ,(first type)) ,(rest type))
-       ,@body))
   
   ;; subtype evaluation done that naively can break, when the subtype is of any complexity worth mentioning...
   ;; although, it seems to be closer than the previous attempts...
@@ -112,13 +124,9 @@
 		   :collect (funcall subreader parse-context vector offt))))))
 
   (defstruct field
-    name	;; as appears in the resulting type
-    type-name	;; name of the containing type
-    op
-    type
-    params
+    op name typespec params
+    type-name
     ;; deduced
-    object-type	;; btleaf, btordered, btstructured
     setter accessor-name type)
 
   (defmethod make-load-form ((field field) &optional env)
@@ -267,9 +275,8 @@
 (defmacro defbintype (type-name &body f)
   (let* ((documentation (cadr (assoc :documentation f)))
 	 (raw-fields (cadr (assoc :fields f)))
-	 (fields (loop :for (op name type . params) :in raw-fields :collect
-		    (make-field :op op :name name :type type :params params :type-name type-name
-				:object-type (type-field-object-type type))))
+	 (fields (loop :for (op name typespec . params) :in raw-fields :collect
+		    (make-field :op op :name name :typespec typespec :params params :type-name type-name)))
 	 (producing-fields (remove-if-not #'field-spec-outputs-field-p fields)))
     `(progn
        (setf (gethash ',type-name *bintypes*)
@@ -346,7 +353,7 @@
 			 (#x1 (set-endianness :little-endian) :lsb)
 			 (#x2 (set-endianness :big-endian) :msb)))
    (value id-version	(unsigned-byte 8))
-   (seek  nil		1)
+   (value nil		(unsigned-byte 8) :ignore t)
    (value id-name	(unsigned-byte 8) :count 8 :stride 1 :format 'vector)
    (match type		(unsigned-byte 16)
 			((#x0 :et-none) (#x1 :et-rel) (#x2 :et-exec) (#x3 :et-dyn)
@@ -376,9 +383,9 @@
    (value shnum		(unsigned-byte 16))
    (value shstrndx	(unsigned-byte 16))
    (value phdrs		(list (value (sub (self) 'phnum)) :element-type 'phdr :stride (value (sub (self) 'phentsize)))
-	  		:offset (sref 'phoff))
+	  		:out-of-stream-offset (sref 'phoff))
    (value phdrs		(list (value (sub (self) 'shnum)) :element-type 'shdr :stride (value (sub (self) 'shentsize)))
-	  		:offset (sref 'shoff)))
+	  		:out-of-stream-offset (sref 'shoff)))
 
 ;; (mapc (compose #'export-bintype-accessors #'bintype) '(ehdr phdr shdr))
 
