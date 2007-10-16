@@ -1,0 +1,3 @@
+[submodule "pergamum"]
+	path = pergamum
+	url = git+ssh://git.feelingofgreen.ru/mnt/enter/git/pergamum

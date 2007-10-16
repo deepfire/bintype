@@ -1,25 +1,11 @@
 (defpackage bintype
-  (:use :common-lisp :alexandria)
+  (:use :common-lisp :alexandria :pergamum)
   (:export
-   bintype defbintype parse-binary export-bintype-accessors
-   enum plain sequence seek zero-terminate-string out-of-stream-absolute sref set-endianness))
+   #:bintype #:defbintype #:parse-binary #:export-bintype-accessors
+   #:match #:plain
+   #:self #:parent #:sub #:value))
 
 (in-package :bintype)
-
-;; This macro belongs to the wider world.
-(defmacro define-evaluation-domain (domain-name (&rest evaluation-result-vars))
-  (with-gensyms (table-name name lambda-list type body)
-    `(progn
-       (defvar ,table-name (make-hash-table))
-       
-       (defmacro ,(format-symbol (symbol-package domain-name) "DEFINE-~S" domain-name) (,name ,lambda-list &body ,body)
-	 `(setf (gethash ',,domain-name ,,table-name)
-		(lambda ,,lambda-list ,@,body)))
-       
-       (defmacro ,(format-symbol (symbol-package domain-name) "BIND-~S" domain-name) ((,@evaluation-result-vars) ,type &body ,body)
-	 "Given a parser op invocation, deliver the appropriately specialised op 'guts'."
-	 `(multiple-value-bind (,,@evaluation-result-vars) (apply (gethash ,(first ,type) ,,table-name) ,(rest ,type))
-	    ,@,body)))))
 
 (defvar *bintypes* (make-hash-table))
 
@@ -64,17 +50,17 @@
     (:method (val (btcontainer btstruct) (sel symbol))
       (setf (gethash sel (btcontainer-childs btcontainer)) val)))
 
-  (define-evaluation-domain parser-op (in-stream-p outputs-field-p))
+  (define-evaluation-domain parser-op (outputs-field-p out-of-stream-offset))
 
   (define-parser-op match (name type values &key ignore out-of-stream-offset)
     (declare (type (or integer null) out-of-stream-offset))
-    (values (null out-of-stream-offset) (not ignore)))
+    (values (null ignore) out-of-stream-offset))
 
   (define-parser-op value (name type &key ignore out-of-stream-offset)
     (declare (type (or integer null) out-of-stream-offset))
-    (values (null out-of-stream-offset) (not ignore)))
+    (values (null ignore) out-of-stream-offset))
 
-  (define-evaluation-domain primitive-type (subbttype subcltype subwidth subreader))
+  (define-evaluation-domain primitive-type (bttype cltype postoffsetify reader))
 
   (defun generic-u8-reader (parse-context vector offset)
     (declare (ignore parse-context))
@@ -88,7 +74,10 @@
 
   (define-primitive-type unsigned-byte (width)
     (declare (type (member 8 16 32) width))
-    (values 'btleaf `(unsigned-byte ,width) (/ width 8)
+    (values 'btleaf `(unsigned-byte ,width)
+	    (lambda (instance btobject offset)
+	      (declare (ignore instance))
+	      (setf (btobject-postoffset btobject) (+ offset (/ width 8))))
 	    (case width
 	      (8 #'generic-u8-reader)
 	      (16 #'generic-u16-reader)
@@ -99,35 +88,58 @@
       (subseq vector offset (or (position 0 vector :start offset :end search-stop) search-stop))))
   
   (define-primitive-type zero-terminated-string (dimension)
-    (values 'btleaf 'string dimension 
+    (values 'btleaf 'string
+	    (lambda (instance btobject offset)
+	      (declare (ignore instance))
+	      (setf (btobject-postoffset btobject) (+ offset dimension)))
 	    (lambda (parse-context vector offset)
 	      (declare (ignore parse-context))
 	      (consume-zero-terminated-string vector string offset))))
   
-  ;; subtype evaluation done that naively can break, when the subtype is of any complexity worth mentioning...
-  ;; although, it seems to be closer than the previous attempts...
+  (defun postoffsetify-btordered (instance obj incoming)
+    "Allocate child instances, with postoffsets calculated trivially, thanks to vector goodness."
+    (declare (ignore instance))
+    (setf (btobj-postoffset obj)
+	  (+ incoming (loop :for i :from 0 :below (btordered-dimension obj)
+			    :for offset :from incoming :by (btordered-stride obj)
+			    :for postoffset :from (+ incoming (btordered-stride obj))
+					    :by (btordered-stride obj) :do
+			 (setf (cref obj i) (make-instance (btordered-contained-type obj)
+					     :parent obj :offset offset :postoffset postoffset
+					     :value-fn (btordered-sub-value-fn obj)))
+		         :finally (return (* (btordered-stride obj) (btordered-dimension obj)))))))
+
   (define-primitive-type vector (dimension &key element-type stride)
     (bind-primitive-type (subbttype subcltype subwidth subreader) element-type
-      (values 'btsequence `(vector ,subcltype) (* dimension stride)
+      (values 'btsequence `(vector ,subcltype) #'postoffsetify-btordered
 	      (lambda (parse-context vector offset)
 		(let ((vector (make-array dimension :element-type subcltype)))
 		  (loop :for offt :from offset :by stride :below dimension 
 		        :for i :from 0 :do
 		     (setf (aref vector i) (funcall subreader parse-context vector offt))))))))
 
+  #| The stoppage is here.
+     array parametering, array parsing -- when does it happen ? |#
   (define-primitive-type list (dimension &key element-type stride)
     (bind-primitive-type (subbttype subcltype subwidth subreader) element-type
-      (values 'btsequence `(vector ,subcltype) (* dimension stride)
+      (values 'btsequence 'list #'postoffsetify-btordered
 	      (lambda (parse-context vector offset)
 		(loop :for offt :from offset :by stride :below dimension 
 		      :for i :from 0
 		   :collect (funcall subreader parse-context vector offt))))))
 
+  (define-evaluation-domain array-specifier (dimension stride subtype))
+
+  (define-array-specifier list (dimension &key element-type stride)
+    ...
+
   (defstruct field
-    op name typespec params
-    type-name
+    raw name typespec type-name
+    ;; evdomain
+    bttype cltype postoffsetify parser
+    outputs-field-p
     ;; deduced
-    setter accessor-name type)
+    setter accessor-name)
 
   (defmethod make-load-form ((field field) &optional env)
     (make-load-form-saving-slots field :environment env))
@@ -154,81 +166,60 @@
     (find name (bintype-fields bintype) :key #'field-name))
 
 (defun sequence-word16-le (seq offset)
-  (logior (ash (elt seq (+ offset 0)) 0)
-	  (ash (elt seq (+ offset 1)) 8)))
-
+  (logior (ash (elt seq (+ offset 0)) 0) (ash (elt seq (+ offset 1)) 8)))
 (defun sequence-word32-le (seq offset)
-  (logior (ash (elt seq (+ offset 0)) 0)
-	  (ash (elt seq (+ offset 1)) 8)
-	  (ash (elt seq (+ offset 2)) 16)
-	  (ash (elt seq (+ offset 3)) 24)))
-
+  (logior (ash (elt seq (+ offset 0)) 0) (ash (elt seq (+ offset 1)) 8)
+	  (ash (elt seq (+ offset 2)) 16) (ash (elt seq (+ offset 3)) 24)))
 (defun sequence-word16-be (seq offset)
-  (logior (ash (elt seq (+ offset 1)) 0)
-	  (ash (elt seq (+ offset 0)) 8)))
-
+  (logior (ash (elt seq (+ offset 1)) 0) (ash (elt seq (+ offset 0)) 8)))
 (defun sequence-word32-be (seq offset)
-  (logior (ash (elt seq (+ offset 3)) 0)
-	  (ash (elt seq (+ offset 2)) 8)
-	  (ash (elt seq (+ offset 1)) 16)
-	  (ash (elt seq (+ offset 0)) 24)))
-
-(defun output-type-definition (name fields)
-  `(defstruct ,name ,@(mapcar #'spec-field-definition fields)))
+  (logior (ash (elt seq (+ offset 3)) 0) (ash (elt seq (+ offset 2)) 8)
+	  (ash (elt seq (+ offset 1)) 16) (ash (elt seq (+ offset 0)) 24)))
 
 (defun output-field-accessor-registration (type-name fields-var-symbol)
-  `(loop :for field :in ,fields-var-symbol
-      (let* ((symbol (format-symbol (symbol-package type-name) "~A-~A"
-				    type-name (field-name field))))
+  `(loop :for field :in (remove-if-not #'field-outputs-field-p ,fields-var-symbol) :do
+      (let* ((symbol (format-symbol (symbol-package type-name) "~A-~A" type-name (field-name field))))
 	(setf (field-setter field) (fdefinition (list setf symbol))
 	      (field-accessor-name field) symbol))))
 
-(defun output-bintype-instantiator-registration (name bintype-symbol)
-  `(setf (bintype-instantiator ,bintype-symbol)
-	 (fdefinition ',(format-symbol (symbol-package name) "MAKE-~A" name))))
-
-(defgeneric postoffsetify (instance btobject offset)
-  "Fill the POSTOFFSET slot of an OBJ, effectively performing the last step
-   for making it walkable."
-  (:method ((instance null) (obj btleaf) incoming)
-    (setf (btobj-postoffset obj) (+ incoming (spec-leaf-width (field-spec (btobj-field obj))))))
-  (:method ((instance null) (obj btordered) incoming)
-    "Allocate child instances, with postoffsets calculated trivially, thanks to vector goodness."
-    (setf (btobj-postoffset obj)
-	  (+ incoming (loop :for i :from 0 :below (btordered-dimension obj)
-			    :for offset :from incoming :by (btordered-stride obj)
-			    :for postoffset :from (+ incoming (btordered-stride obj))
-					    :by (btordered-stride obj) :do
-			 (setf (cref obj i) (make-instance (btordered-contained-type obj)
-					     :parent obj :offset offset :postoffset postoffset
-					     :value-fn (btordered-sub-value-fn obj)))
-		         :finally (return (* (btordered-stride obj) (btordered-dimension obj))))))))
-
+#| Did I begin thinking about this problem from the wrong end? -- Probably, but at the time, the problem was underspecified... 
+   ... In fact implementation was a way to think about the problem. |#
+#| Where the postoffsetify-es are called from? -- from within the postoffsetify ot the structured, naturally. |#
+#| How to dispatch postoffsetify on structure classes? -- easy, and the magic is already in place. |#
+#| How to pass array parameters? |#
 (defun output-postoffsetify-method (name fields)
-  (with-gensyms (bintype instance obj offset obj field-obj field-instance)
-    `(defmethod postoffsetify ((,instance ,name) (,obj btstructured) ,offset)
-       (let ((,bintype (bintype (field-type-name (btobj-field ,obj)))))
-	 ,@(loop :for field :in fields :for type = (field-type field) :collect
-	      `(let ((,field-obj (make-instance ',(field-object-type field) :parent ,obj
-				  :bintype ,bintype :field (field ,bintype `,(field-name field))
-				  :value-fn (lambda (offset) ,(field-spec field))))
-		     ,field-instance)
-		 ,(case (field-object-type field)
-		    (btordered
-		     (let ((contained-spec (spec-ordered-contained-spec spec)))
-		       `(setf (btordered-stride ,field-obj) ,(spec-ordered-stride spec)
-			      (btordered-dimension ,field-obj) ,(spec-ordered-dimension spec)
-			      (btordered-contained-type ,field-obj) ',(spec-object-type contained-spec)
-			      (btordered-sub-value-fn ,field-obj) (lambda (offset) ,contained-spec))))
-		    (btstructured
-		     `(let ((field-bintype (bintype ',(spec-structured-type spec))))
-			(setf (btstructured-bintype ,field-obj) field-bintype
-			      ,field-instance (funcall (bintype-instantiator field-bintype))
-			      (btobj-value ,field-obj) ,field-instance))))
-		 (setf (btobj-offset ,field-obj) ,offset
-		       ,offset (postoffsetify ,field-instance ,field-obj ,offset)
-		       (cref ,obj ',(field-name field)) ,field-obj)))
-	 (setf (btobj-postoffset ,obj) ,offset)))))
+  (with-gensyms (bintype instance obj offset field-obj field-instance bt-type cl-type postoffsetify parser not-ignored out-of-stream-offset op params)
+    `(defmethod postoffsetify ((,instance ,name) (,obj btstructured) ,offset &aux (bintype (field-type-name (btobj-field ,obj))))
+       ,@(loop :for field :in fields :collect
+	    #| What was frozen before and cannot be parametrised dynamically anymore?
+	       1. the properties of the CL type, notably the unsigned-byte's width
+	       2. the ignore-ability
+	       What are the desirable per-field side-effects:
+	       1. out-of-stream-offset 2. array size |#
+	    :collect
+	    (op-parameter-destructurer (op params) (field-typespec field)
+	      `(funcall-bind-parser-op (,not-ignored ,out-of-stream-offset) (,@(mapcar #'quote-lists-filter (field-raw field)))
+	         (funcall-bind-primitive-type (,bt-type ,cl-type ,postoffstify ,parser) (,op ,@(mapcar #'quote-lists-filter params))
+		   (let ((,field-obj (make-instance ,bt-type :parent ,obj :bintype ,bintype
+				     :field (field ,bintype `,(field-name field))
+				     :value-fn ,parser))
+			 ,field-instance)
+		     ,(case ,bt-type
+		        (btordered
+			 (let ((contained-spec (spec-ordered-contained-spec spec)))
+			   `(setf (btordered-stride ,field-obj) ,(spec-ordered-stride spec)
+				  (btordered-dimension ,field-obj) ,(spec-ordered-dimension spec)
+				  (btordered-contained-type ,field-obj) ',(spec-object-type contained-spec)
+				  (btordered-sub-value-fn ,field-obj) (lambda (offset) ,contained-spec))))
+			(btstructured
+			 `(let ((field-bintype (bintype ',(spec-structured-type spec))))
+			    (setf (btstructured-bintype ,field-obj) field-bintype
+				  ,field-instance (funcall (bintype-instantiator field-bintype))
+				  (btobj-value ,field-obj) ,field-instance))))
+		     (setf (btobj-offset ,field-obj) ,offset
+			   ,offset (postoffsetify ,field-instance ,field-obj ,offset)
+			   (cref ,obj ',(field-name field)) ,field-obj)))))))
+    (setf (btobj-postoffset ,obj) ,offset)))
 
 ;; The proper way is to make arrays specializable by their location in the bintype hierarchy
 ;; The dispatch matches CLOS badly. Let's face it. But let's get it to a workable state first.
@@ -266,29 +257,36 @@
 
 (defun parse (bintype array &optional (offset 0))
   (let* ((instance (funcall (bintype-instantiator bintype)))
-	 (btstructured (make-instance 'btstructured :bintype bintype)))
+	 (btstructured (make-instance 'btstructured :bintype bintype :value instance)))
     (declare (dynamic-extent btstructured))
     (postoffsetify instance obj offset)
     (unserialize btstructured)))
 
-
 (defmacro defbintype (type-name &body f)
-  (let* ((documentation (cadr (assoc :documentation f)))
-	 (raw-fields (cadr (assoc :fields f)))
-	 (fields (loop :for (op name typespec . params) :in raw-fields :collect
-		    (make-field :op op :name name :typespec typespec :params params :type-name type-name)))
-	 (producing-fields (remove-if-not #'field-spec-outputs-field-p fields)))
-    `(progn
-       (setf (gethash ',type-name *bintypes*)
-	     (make-bintype :name ',type-name :documentation ,documentation :fields ',fields))
-       ,(output-type-definition type-name producing-fields)
-       (define-primitive-type ,type-name ()
-       (let* ((bintype (bintype ',type-name))
-	      (fields (bintype-fields bintype))
-	      (producing-fields (remove-if-not #'field-spec-outputs-field-p fields)))
-	 ,(output-field-accessor-registration type-name 'producing-fields)
-	 ,(output-bintype-instantiator-registration 'bintype)
-	 ,(output-postoffsetify-method type-name fields)))))
+  (flet ((analyse-field-form (type-name raw)
+	   (destructuring-bind (op name typespec &rest params) raw
+	     (declare (ignore op params))
+	     (apply-bind-parser-op (outputs-field-p out-of-stream-offset) raw
+	       (apply-bind-primitive-type (bttype cltype postoffstify reader) typespec
+	         (make-field :raw raw :name name :typespec typespec :type-name type-name
+		   :bttype bttype :cltype cltype :postoffsetify postoffsetify :reader reader
+		   :outputs-field-p outputs-field-p
+		   #| runtime-only effect: out-of-stream-offset |#)))))
+	 (output-defstruct-field (field)
+	   `(,(field-name field) nil :type ,(field-cltype field))))
+    (let* ((documentation (cadr (assoc :documentation f)))
+	   (fields (mapcar #'analyse-field-form (cadr (assoc :fields f))))
+	   (producing-fields (remove-if-not #'field-outputs-field-p fields)))
+      `(progn
+	 (setf (gethash ',type-name *bintypes*)
+	       (make-bintype :name ',type-name :documentation ,documentation :fields ',fields))
+	 (defstruct ,type-name ,@(mapcar #'output-defstruct-field producing-fields))
+	 (let* ((bintype (bintype ',type-name))
+		(fields (bintype-fields bintype)))
+	   ,(output-field-accessor-registration type-name 'fields)
+	   (setf (bintype-instantiator bintype)
+		 (fdefinition ',(format-symbol (symbol-package type-name) "MAKE-~A" type-name)))
+	   ,(output-postoffsetify-method type-name fields))))))
 
 (defun export-bintype-accessors (bintype)
   (export (list* (bintype-name bintype) (mapcar #'field-accessor-name (bintype-fields bintype)))))
