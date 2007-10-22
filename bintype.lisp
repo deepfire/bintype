@@ -1,7 +1,7 @@
 (defpackage bintype
   (:use :common-lisp :alexandria :pergamum)
   (:export
-   #:bintype #:defbintype #:parse-binary #:export-bintype-accessors
+   #:bintype #:defbintype #:parse #:export-bintype-accessors
    #:match #:plain
    #:self #:parent #:sub #:value))
 
@@ -22,13 +22,15 @@
     (not (null (btcontainer-childs container))))
 
   (defclass btordered (btcontainer)
-    ((dimension :accessor btordered-dimension)
-     (stride :accessor btordered-stride)
-     (element-type :accessor btordered-element-type)))
+    ((dimension :accessor btordered-dimension :initarg :dimension)
+     (stride :accessor btordered-stride :initarg :stride)
+     (element-type :accessor btordered-element-type :initarg :element-type)))
 
   (defclass btstructured (btcontainer)
     ((bintype :accessor btstructured-bintype :initarg :bintype)
-     (width-cache :accessor btstructured-width-cache :initform nil :initarg :width-cache)))
+     (width-cache :accessor btstructured-width-cache :initform nil :initarg :width-cache))
+    (:default-initargs
+     :childs (make-hash-table)))
 
   (defclass btleaf (btcontainer)
     ((value-fn :accessor btleaf-value-fn :initarg :value-fn)))
@@ -47,17 +49,19 @@
     (:method (val (btcontainer btstructured) (sel symbol))
       (setf (gethash sel (btcontainer-childs btcontainer)) val)))
 
-  (define-evaluation-domain parser-op (outputs-field-p out-of-stream-offset))
+  (define-lambda-parser parser-op (outputs-field-p out-of-stream-offset quote-spec))
 
   (define-parser-op value (name type &key ignore out-of-stream-offset)
-    (declare (ignore name type) (type (or integer null) out-of-stream-offset))
-    (values (null ignore) out-of-stream-offset))
+    (declare (ignore name type);;  (type (or integer null) out-of-stream-offset)
+	     )
+    (values (null ignore) out-of-stream-offset '(t t &rest nil)))
 
   (define-parser-op match (name type values &key ignore out-of-stream-offset)
-    (declare (ignore name type values) (type (or integer null) out-of-stream-offset))
-    (values (null ignore) out-of-stream-offset))
+    (declare (ignore name type values);;  (type (or integer null) out-of-stream-offset)
+	     )
+    (values (null ignore) out-of-stream-offset '(t t t &rest nil)))
 
-  (define-evaluation-domain primitive-type (btmaker cltype))
+  (define-lambda-parser primitive-type (btmaker cltype quote-spec))
 
   (defun generic-u8-reader (offset)
     (declare (special *vector*))
@@ -75,11 +79,13 @@
     (declare (type (member 8 16 32) width))
     (values (list 'btleaf
 		  :value-fn (case width
-			      (8 #'generic-u8-reader)
-			      (16 #'generic-u16-reader)
-			      (32 #'generic-u32-reader))
-		  :width-fn (lambda () (/ width 8)))
-	    `(unsigned-byte ,width)))
+			      (8 '#'generic-u8-reader)
+			      (16 '#'generic-u16-reader)
+			      (32 '#'generic-u32-reader))
+		  :width-fn '(lambda () (/ width 8))
+		  )
+	    `(unsigned-byte ,width)
+	    '(nil)))
   
   (defun consume-zero-terminated-string (vector offset dimension)
     (let ((search-stop (min (+ offset dimension) (length vector))))
@@ -87,25 +93,34 @@
   
   (define-primitive-type zero-terminated-string (dimension)
     (values (list 'btleaf
-		  :value-fn (lambda (offset)
-			      (declare (special *vector*))
-			      (consume-zero-terminated-string *vector* offset dimension))
-		  :width-fn (lambda () dimension))
-	    'string))
+		  :value-fn `(lambda (offset)
+			       (declare (special *vector*))
+			       (consume-zero-terminated-string *vector* offset ,dimension))
+		  :width-fn `(lambda () ,dimension))
+	    'string
+	    '(nil)))
 
   (define-primitive-type vector (dimension &key element-type stride)
-    (apply-bind-primitive-type (subinitargs subcltype) element-type
-      (declare (ignore subinitargs))
+    (apply-bind-primitive-type (subinitargs subcltype qspec) element-type
+      (declare (ignore subinitargs qspec))
       (values (list 'btordered
 		    :element-type element-type
-		    :width-fn (lambda () (* stride dimension)))
-	      `(vector ,subcltype))))
+		    :dimension dimension
+		    :childs (make-array dimension)
+		    :stride stride
+		    :width-fn `(lambda () (* ,stride ,dimension)))
+	      `(vector ,subcltype)
+	      '(nil &key (element-type t) stride))))
 
   (define-primitive-type list (dimension &key element-type stride)
-   (values (list 'btordered
-		 :element-type element-type
-		 :width-fn (lambda () (* stride dimension)))
-	   `list))
+    (values (list 'btordered
+		  :element-type element-type
+		  :dimension dimension
+		  :childs (make-array dimension)
+		  :stride stride
+		  :width-fn `(lambda () (* ,stride ,dimension)))
+	    `list
+	    '(nil &key (element-type t) stride)))
   
   (defstruct field
     raw name typespec
@@ -151,37 +166,48 @@
 
 (defun output-field-accessor-registration (type-name fields-var-symbol)
   `(loop :for field :in (remove-if-not #'field-outputs-field-p ,fields-var-symbol) :do
-      (let* ((symbol (format-symbol (symbol-package ,type-name) "~A-~A" type-name (field-name field))))
-	(setf (field-setter field) (fdefinition (list setf symbol))
+      (let* ((symbol (format-symbol (symbol-package ',type-name) "~A-~A" ',type-name (field-name field))))
+	(setf (field-setter field) (fdefinition `(setf ,symbol))
 	      (field-accessor-name field) symbol))))
 
 (defgeneric pave (something obj)
   (:method (something (obj btordered))
     (declare (ignore something))
-    (apply-bind-primitive-type (initargs cl-type) (btordered-element-type obj)
-      (declare (ignorable cl-type))
+    (apply-bind-primitive-type (initargs cl-type qspec) (btordered-element-type obj)
+      (declare (ignorable cl-type qspec))
+      (format t "btordered, dim, creffee: ~S ~S~%" (btordered-dimension obj) (btcontainer-childs obj))
       (loop :for i :below (btordered-dimension obj)
 	    :for offset :from (btobj-offset obj) :by (btordered-stride obj) :do
 	 (setf (cref obj i) (apply #'make-instance (append initargs (list :parent obj :offset offset))))))))
 
 #| Did I begin thinking about this problem from the wrong end? -- Probably, but at the time, the problem was underspecified... 
    ... In fact implementation was a way to think about the problem. |#
-(defun output-pave-method (name fields)
-  `(defmethod pave ((instance ,name) (obj btstructured) &aux (offset-marker (btobj-offset obj)) (bintype (bintype ',name)))
-     ,@(loop :for field :in fields :collect
-	  (op-parameter-destructurer (op params) (field-typespec field)
-	     #| The binding construct below does not make out enough difference between
-	        compile-time and runtime information. |#
-	     `(funcall-bind-parser-op (not-ignored out-of-stream-offset) (,@(mapcar #'quote-lists-filter (field-raw field)))
-		(funcall-bind-primitive-type (intargs cl-type sub2typespec) (,op ,@(mapcar #'quote-lists-filter params))
-		  (let* ((offset (or out-of-stream-offset offset-marker))
-			 (field-obj (apply #'make-instance (append initargs (list :parent obj :offset offset)))))
-		    (setf (cref obj ',(field-name field)) field-obj)
-		    (when (typep field-obj 'btcontainer)
-		      (pave (when (typep field-obj 'btstructured) field-obj) field-obj))
-		    (unless out-of-stream-offset
-		      (incf offset-marker (funcall (btobj-width-fn field-obj)))))))))
-     (setf (btobj-postoffset obj) offset)))
+(defun output-pave-method (name fields &aux (self-sym (intern "*SELF*" (symbol-package name))))
+  `(defmethod pave ((instance ,name) (obj btstructured) &aux (stream-marker (btobj-offset obj)))
+     (let ((,self-sym obj))
+       (declare (special ,self-sym))
+       ,@(loop :for field :in fields :collect
+	    #| The binding construct below does not make out enough difference between
+	       compile-time and runtime information. |#
+	    #| DO NOT QUOTE EVERYTHING! |#
+	    (apply-bind-parser-op (not-ignored out-of-stream-offset raw-quotespec) (field-raw field)
+	      (declare (ignore not-ignored out-of-stream-offset))
+	      (apply-bind-primitive-type (initargs cl-type type-quotespec) (field-typespec field)
+		(declare (ignore initargs cl-type))
+		(let ((quoted-raw (lambda-xform #'quote-when raw-quotespec (field-raw field)))
+		      (quoted-type (lambda-xform #'quote-when type-quotespec (field-typespec field))))
+		  (format t "raw: ~S, type: ~S~%" quoted-raw quoted-type)
+		  `(funcall-bind-parser-op (not-ignored out-of-stream-offset qspec) ,quoted-raw
+		     (declare (ignore not-ignored qspec))
+		     (funcall-bind-primitive-type (initargs cl-type qspec) ,quoted-type
+		       (declare (ignore cl-type qspec))
+		       (let* ((offset (or out-of-stream-offset stream-marker))
+			      (field-obj (apply #'make-instance (append initargs (list :parent obj :offset offset)))))
+			 (setf (cref obj ',(field-name field)) field-obj)
+			 (when (typep field-obj 'btcontainer)
+			   (pave (when (typep field-obj 'btstructured) (btobj-value field-obj)) field-obj))
+			 (unless out-of-stream-offset
+			   (incf stream-marker (funcall (btobj-width-fn field-obj))))))))))))))
 
 #| Fact: during fill-value, only leaves need btobj-offset, which is of little wonder. |#
 (defgeneric fill-value (btobject)
@@ -218,11 +244,12 @@
   (flet ((analyse-field-form (raw)
 	   (destructuring-bind (op name typespec &rest params) raw
 	     (declare (ignore op params))
-	     (apply-bind-parser-op (outputs-field-p out-of-stream-offset) raw
-	       (declare (ignore out-of-stream-offset))
-	       (apply-bind-primitive-type (bttype cltype) typespec
+	     (apply-bind-parser-op (outputs-field-p out-of-stream-offset qspec) raw
+	       (declare (ignore out-of-stream-offset qspec))
+	       (apply-bind-primitive-type (bttype cltype qspec) typespec
+		 (declare (ignore qspec))
 	         (make-field :raw raw :name name :typespec typespec
-		   :bttype bttype :cltype cltype :outputs-field-p outputs-field-p)))))
+		   :bttype bttype :cltype (list 'or 'null cltype) :outputs-field-p outputs-field-p)))))
 	 (output-defstruct-field (field)
 	   `(,(field-name field) nil :type ,(field-cltype field))))
     (let* ((documentation (cadr (assoc :documentation f)))
