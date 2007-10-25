@@ -9,150 +9,148 @@
 
 (defvar *bintypes* (make-hash-table))
 
-  (defclass btobj ()
-    ((offset :accessor btobj-offset :initarg :offset)
-     (parent :accessor parent :initarg :parent)
-     (width-fn :accessor btobj-width-fn :initarg :width-fn)
-     (value :accessor btobj-value :initarg :value)))
+(defclass btobj ()
+  ((offset :accessor btobj-offset :initarg :offset)
+   (parent :accessor parent :initarg :parent)
+   (width-fn :accessor btobj-width-fn :initarg :width-fn)
+   (value :accessor btobj-value :initarg :value)))
 
-  (defclass btcontainer (btobj)
-    ((childs :accessor btcontainer-childs :initarg :childs)))
+(defclass btcontainer (btobj)
+  ((childs :accessor btcontainer-childs :initarg :childs)))
 
-  (defun btcontainer-paved-p (container)
-    (not (null (btcontainer-childs container))))
+(defun btcontainer-paved-p (container)
+  (not (null (btcontainer-childs container))))
 
-  (defclass btordered (btcontainer)
-    ((dimension :accessor btordered-dimension :initarg :dimension)
-     (stride :accessor btordered-stride :initarg :stride)
-     (element-type :accessor btordered-element-type :initarg :element-type)))
+(defclass btordered (btcontainer)
+  ((dimension :accessor btordered-dimension :initarg :dimension)
+   (stride :accessor btordered-stride :initarg :stride)
+   (element-type :accessor btordered-element-type :initarg :element-type)))
 
-  (defclass btstructured (btcontainer)
-    ((bintype :accessor btstructured-bintype :initarg :bintype)
-     (width-cache :accessor btstructured-width-cache :initform nil :initarg :width-cache))
-    (:default-initargs
-     :childs (make-hash-table)))
+(defclass btstructured (btcontainer)
+  ((bintype :accessor btstructured-bintype :initarg :bintype)
+   (width-cache :accessor btstructured-width-cache :initform nil :initarg :width-cache))
+  (:default-initargs
+   :childs (make-hash-table)))
 
-  (defclass btleaf (btcontainer)
-    ((value-fn :accessor btleaf-value-fn :initarg :value-fn)))
+(defclass btleaf (btcontainer)
+  ((value-fn :accessor btleaf-value-fn :initarg :value-fn)))
 
-  (defgeneric cref (container sel)
-    (:documentation "Reach for a child of a BTCONTAINER.")
-    (:method ((btcontainer btordered) (sel integer))
-      (elt (btcontainer-childs btcontainer) sel))
-    (:method ((btcontainer btstructured) (sel symbol))
-      (gethash sel (btcontainer-childs btcontainer))))
+(defgeneric cref (container sel)
+  (:documentation "Reach for a child of a BTCONTAINER.")
+  (:method ((btcontainer btordered) (sel integer))
+    (elt (btcontainer-childs btcontainer) sel))
+  (:method ((btcontainer btstructured) (sel symbol))
+    (gethash sel (btcontainer-childs btcontainer))))
 
-  (defgeneric (setf cref) (val container sel)
-    (:documentation "Set a child of a BTCONTAINER.")
-    (:method (val (btcontainer btordered) (sel integer))
-      (setf (elt (btcontainer-childs btcontainer) sel) val))
-    (:method (val (btcontainer btstructured) (sel symbol))
-      (setf (gethash sel (btcontainer-childs btcontainer)) val)))
+(defgeneric (setf cref) (val container sel)
+  (:documentation "Set a child of a BTCONTAINER.")
+  (:method (val (btcontainer btordered) (sel integer))
+    (setf (elt (btcontainer-childs btcontainer) sel) val))
+  (:method (val (btcontainer btstructured) (sel symbol))
+    (setf (gethash sel (btcontainer-childs btcontainer)) val)))
 
-  (define-evaluation-domain toplevel-op)
+(define-evaluation-domain toplevel-op)
 
-  (define-evaluations toplevel-op value (name type &key ignore out-of-stream-offset)
-    (emits-field-p (ignore)
-      (null ignore))
-    (out-of-stream-offset (out-of-stream-offset)
-      out-of-stream-offset)
-    (quotation ()
-      '(t t &rest nil)))
+(define-evaluations toplevel-op value (name type &key ignore out-of-stream-offset)
+  (emits-field-p (ignore)
+    (null ignore))
+  (out-of-stream-offset (out-of-stream-offset)
+    out-of-stream-offset)
+  (quotation ()
+    '(t t &rest nil)))
 
-  (define-evaluations toplevel-op match (name type values &key ignore out-of-stream-offset)
-    (emits-field-p (ignore)
-      (null ignore))
-    (out-of-stream-offset (out-of-stream-offset)
-      out-of-stream-offset)
-    (quotation ()
-      '(t t t &rest nil)))
+(define-evaluations toplevel-op match (name type values &key ignore out-of-stream-offset)
+  (emits-field-p (ignore)
+    (null ignore))
+  (out-of-stream-offset (out-of-stream-offset)
+    out-of-stream-offset)
+  (quotation ()
+    '(t t t &rest nil)))
 
-  (define-evaluation-domain typespec)
+(define-evaluation-domain typespec)
 
-  (defun generic-u8-reader (offset)
-    (declare (special *vector*))
-    (aref *vector* offset))
+(defun generic-u8-reader (offset)
+  (declare (special *vector*))
+  (aref *vector* offset))
 
-  (defun generic-u16-reader (offset)
-    (declare (special *u16-reader* *vector*))
-    (funcall *u16-reader* *vector* offset))
+(defun generic-u16-reader (offset)
+  (declare (special *u16-reader* *vector*))
+  (funcall *u16-reader* *vector* offset))
 
-  (defun generic-u32-reader (offset)
-    (declare (special *u32-reader* *vector*))
-    (funcall *u32-reader* *vector* offset))
+(defun generic-u32-reader (offset)
+  (declare (special *u32-reader* *vector*))
+  (funcall *u32-reader* *vector* offset))
 
-  (define-evaluations typespec unsigned-byte (width)
-    (initargs (width)
-      (list 'btleaf
-	    :value-fn (case width
-			(8 #'generic-u8-reader)
-			(16 #'generic-u16-reader)
-			(32 #'generic-u32-reader))
-	    :width-fn (lambda () (/ width 8))))
-    (cl-type (width)
-      `(unsigned-byte ,width))
-    (quotation ()
-      '(nil)))
+(define-evaluations typespec unsigned-byte (width)
+  (initargs (width)
+    (list 'btleaf
+	  :value-fn (case width
+		      (8 #'generic-u8-reader)
+		      (16 #'generic-u16-reader)
+		      (32 #'generic-u32-reader))
+	  :width-fn (lambda () (/ width 8))))
+  (cl-type (width)
+    `(unsigned-byte ,width))
+  (quotation ()
+    '(nil)))
   
-  (defun consume-zero-terminated-string (vector offset dimension)
-    (let ((search-stop (min (+ offset dimension) (length vector))))
-      (subseq vector offset (or (position 0 vector :start offset :end search-stop) search-stop))))
+(defun consume-zero-terminated-string (vector offset dimension)
+  (let ((search-stop (min (+ offset dimension) (length vector))))
+    (subseq vector offset (or (position 0 vector :start offset :end search-stop) search-stop))))
   
-  (define-evaluations typespec zero-terminated-string (dimension)
-    (initargs (dimension)
-      (list 'btleaf
-	    :value-fn (lambda (offset)
-			(declare (special *vector*))
-			(consume-zero-terminated-string *vector* offset dimension))
-	    :width-fn (lambda () dimension)))
-    (cl-type ()
-      'string)
-    (quotation ()
-      '(nil)))
+(define-evaluations typespec zero-terminated-string (dimension)
+  (initargs (dimension)
+    (list 'btleaf
+	  :value-fn (lambda (offset)
+		      (declare (special *vector*))
+		      (consume-zero-terminated-string *vector* offset dimension))
+	  :width-fn (lambda () dimension)))
+  (cl-type ()
+    'string)
+  (quotation ()
+    '(nil)))
 
-  (define-evaluations typespec sequence (dimension &key element-type stride (format :list))
-    (initargs (dimension element-type stride)
-       (list 'btordered
-	     :element-type element-type :dimension dimension :stride stride
-	     :childs (make-array dimension)
-	     :width-fn (lambda () (* stride dimension))))
-    (cl-type (element-type format)
-       (ecase format
-	 (:list 'list)
-	 (:vector `(vector ,(apply-typespec 'cl-type element-type)))))
-    (quotation ()
-       '(nil &key (element-type t) stride format)))
+(define-evaluations typespec sequence (dimension &key element-type stride (format :list))
+  (initargs (dimension element-type stride)
+    (list 'btordered
+	  :element-type element-type :dimension dimension :stride stride
+	  :childs (make-array dimension)
+	  :width-fn (lambda () (* stride dimension))))
+  (cl-type (element-type format)
+    (ecase format
+      (:list 'list)
+      (:vector `(vector ,(apply-typespec 'cl-type element-type)))))
+  (quotation ()
+    '(nil &key (element-type t) stride format)))
   
-  (defstruct field
-    raw name typespec
-    ;; evdomain
-    bttype cltype outputs-field-p
-    ;; deduced
-    setter accessor-name)
+(defstruct field
+  raw name typespec
+  bttype cltype outputs-field-p
+  setter accessor-name)
 
-  (defmethod make-load-form ((field field) &optional env)
-    (make-load-form-saving-slots field :environment env))
+(defmethod make-load-form ((field field) &optional env)
+  (make-load-form-saving-slots field :environment env))
 
-  (defmethod print-object ((field field) stream)
-    (format stream "#S(BINTYPE::FIELD NAME: ~S SPEC: ~S)"
-	    (field-name field) (field-typespec field)))
+(defmethod print-object ((field field) stream)
+  (format stream "#S(BINTYPE::FIELD NAME: ~S SPEC: ~S)"
+	  (field-name field) (field-typespec field)))
 
-  (defstruct bintype
-    (name nil :type symbol)
-    (documentation nil :type string)
-    instantiator
-    parser
-    fields)
+(defstruct bintype
+  (name nil :type symbol)
+  (documentation nil :type string)
+  instantiator
+  parser
+  fields)
 
-  (defun bintype (name)
-    (declare (type symbol name))
-    (let ((ret (gethash name *bintypes*)))
-      (unless ret
-	(error "Unable to find the requested bintype ~S." name))
-      ret))
+(defun bintype (name)
+  (declare (type symbol name))
+  (let ((ret (gethash name *bintypes*)))
+    (unless ret
+      (error "Unable to find the requested bintype ~S." name))
+    ret))
 
-  (defun field (bintype name)
-    (find name (bintype-fields bintype) :key #'field-name))
+(defun field (bintype name)
+  (find name (bintype-fields bintype) :key #'field-name))
 
 (defun sequence-word16-le (seq offset)
   (logior (ash (elt seq (+ offset 0)) 0) (ash (elt seq (+ offset 1)) 8)))
