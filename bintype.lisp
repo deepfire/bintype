@@ -27,8 +27,7 @@
    (element-type :accessor btordered-element-type :initarg :element-type)))
 
 (defclass btstructured (btcontainer)
-  ((bintype :accessor btstructured-bintype :initarg :bintype)
-   (width-cache :accessor btstructured-width-cache :initform nil :initarg :width-cache))
+  ((bintype :accessor btstructured-bintype :initarg :bintype))
   (:default-initargs
    :childs (make-hash-table)))
 
