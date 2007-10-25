@@ -179,12 +179,13 @@
 	      (field-accessor-name field) symbol))))
 
 (defgeneric pave (something obj)
+  (:method (something (obj btleaf)))
   (:method (something (obj btordered))
     (declare (ignore something))
     (let ((initargs (apply-typespec 'initargs (btordered-element-type obj))))
       (format t "btordered, dim, creffee: ~S ~S~%" (btordered-dimension obj) (btcontainer-childs obj))
       (loop :for i :below (btordered-dimension obj)
-	    :for offset :from (btobj-offset obj) :by (btordered-stride obj) :do
+	    :for offset :from (btobj-offset obj) :by (the integer (btordered-stride obj)) :do
 	 (setf (cref obj i) (apply #'make-instance (append initargs (list :parent obj :offset offset))))))))
 
 #| Did I begin thinking about this problem from the wrong end? -- Probably, but at the time, the problem was underspecified... 
@@ -199,11 +200,10 @@
 	    #| DO NOT QUOTE EVERYTHING! |#
 	    (let ((quoted-toplevel (lambda-xform #'quote-when (cons nil (apply-toplevel-op 'quotation (field-raw field))) (field-raw field)))
 		  (quoted-typespec (lambda-xform #'quote-when (cons nil (apply-typespec 'quotation (field-typespec field))) (field-typespec field))))
-	      (format t "toplevel: ~S, typespec: ~S~%" quoted-toplevel quoted-typespec)
 	      `(let* (
 		      (oos-offset (literal-funcall-toplevel-op out-of-stream-offset ,quoted-toplevel))
 		      (initargs (literal-funcall-typespec initargs ,quoted-typespec))
-		      (offset (or nil oos-offset stream-marker))
+		      (offset (or oos-offset stream-marker))
 		      (field-obj (apply #'make-instance (append initargs (list :parent obj :offset offset)))))
 		 (setf (cref obj ',(field-name field)) field-obj)
 		 (when (typep field-obj 'btcontainer)
@@ -233,7 +233,8 @@
 
 (defun value (obj)
   (declare (type btleaf obj))
-  (or (btobj-value obj) (fill-value obj)))
+  (if (slot-boundp obj 'value)
+      (btobj-value obj) (fill-value obj)))
 
 (defun parse (bintype *vector* &optional (offset 0) &aux *u16-reader* *u32-reader*)
   (declare (dynamic-extent btstructured) (special *u16-reader* *u32-reader* *vector*))
