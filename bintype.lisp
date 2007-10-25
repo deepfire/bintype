@@ -35,6 +35,16 @@
 (defclass btleaf (btcontainer)
   ((value-fn :accessor btleaf-value-fn :initarg :value-fn)))
 
+(defmethod print-object ((o btordered) s)
+  (format s "#<BTORDERED {~X} dimension: ~D stride: ~D element-type: ~S>"
+	  (sb-vm::get-lisp-obj-address o)
+	  (btordered-dimension o) (btordered-stride o) (btordered-element-type o)))
+
+(defmethod print-object ((o btstructured) s)
+  (format s "#<BTSTRUCTURED {~X} bintype: ~S>"
+	  (sb-vm::get-lisp-obj-address o)
+	  (bintype-name (btstructured-bintype o))))
+
 (defgeneric cref (container sel)
   (:documentation "Reach for a child of a BTCONTAINER.")
   (:method ((btcontainer btordered) (sel integer))
