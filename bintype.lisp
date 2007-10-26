@@ -1,5 +1,5 @@
 (defpackage bintype
-  (:use :common-lisp :alexandria :pergamum)
+  (:use :common-lisp :alexandria :pergamum :iterate :typeext)
   (:export
    #:bintype #:defbintype #:parse #:export-bintype-accessors
    #:match #:plain
