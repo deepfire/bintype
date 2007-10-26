@@ -3,7 +3,7 @@
   (:export
    #:bintype #:defbintype #:parse #:export-bintype-accessors
    #:match #:plain
-   #:self #:parent #:sub #:value))
+   #:set-endianness #:self #:parent #:sub #:value))
 
 (in-package :bintype)
 
@@ -13,7 +13,9 @@
   ((offset :accessor btobj-offset :initarg :offset)
    (parent :accessor parent :initarg :parent)
    (width-fn :accessor btobj-width-fn :initarg :width-fn)
-   (value :accessor btobj-value :initarg :value)))
+   (initial-to-final-fn :accessor btobj-initial-to-final-fn :initarg :initial-to-final-fn)
+   (initial-value :accessor btobj-initial-value :initarg :initial-value)
+   (final-value :accessor btobj-final-value :initarg :final-value)))
 
 (defclass btcontainer (btobj)
   ((childs :accessor btcontainer-childs :initarg :childs)))
@@ -66,7 +68,19 @@
   (out-of-stream-offset (out-of-stream-offset)
     out-of-stream-offset)
   (quotation ()
-    '(t t &rest nil)))
+    '(t t &rest nil))
+  (initial-to-final-xform ()
+    '#'identity))
+
+(defun emit-match-cond/case (testform matchforms)
+  (if (every (compose #'atom #'car) matchforms)
+      `(case ,testform
+	 ,@matchforms
+	 (default (error "Value ~S didn't match ~S." ,testform ',matchforms)))
+      (once-only (testform)
+	`(cond ,@(iter (for (testval . forms) in matchforms)
+		       (collect `((equal ,testform ',testval) ,@forms)))
+	       (t (error "Value ~S didn't match ~S." ,testform ',matchforms))))))
 
 (define-evaluations toplevel-op match (name type values &key ignore out-of-stream-offset)
   (emits-field-p (ignore)
@@ -74,7 +88,10 @@
   (out-of-stream-offset (out-of-stream-offset)
     out-of-stream-offset)
   (quotation ()
-    '(t t t &rest nil)))
+    '(t t t &rest nil))
+  (initial-to-final-xform (values)
+    `(lambda (obj)
+       ,(emit-match-cond/case '(btobj-initial-value obj) values))))
 
 (define-evaluation-domain typespec)
 
@@ -193,36 +210,41 @@
 (defun output-pave-method (name fields &aux (self-sym (intern "*SELF*" (symbol-package name))))
   `(defmethod pave ((instance ,name) (obj btstructured) &aux (stream-marker (btobj-offset obj)))
      (let ((,self-sym obj))
-       (declare (special ,self-sym))
-       ,@(loop :for field :in fields :collect
-	    #| The binding construct below does not make out enough difference between
-	       compile-time and runtime information. |#
-	    #| DO NOT QUOTE EVERYTHING! |#
-	    (let ((quoted-toplevel (lambda-xform #'quote-when (cons nil (apply-toplevel-op 'quotation (field-raw field))) (field-raw field)))
-		  (quoted-typespec (lambda-xform #'quote-when (cons nil (apply-typespec 'quotation (field-typespec field))) (field-typespec field))))
-	      `(let* (
-		      (oos-offset (literal-funcall-toplevel-op out-of-stream-offset ,quoted-toplevel))
-		      (initargs (literal-funcall-typespec initargs ,quoted-typespec))
-		      (offset (or oos-offset stream-marker))
-		      (field-obj (apply #'make-instance (append initargs (list :parent obj :offset offset)))))
-		 (setf (cref obj ',(field-name field)) field-obj)
-		 (when (typep field-obj 'btcontainer)
-		   (pave (when (typep field-obj 'btstructured) (btobj-value field-obj)) field-obj))
-		 (unless oos-offset
-		   (incf stream-marker (funcall (btobj-width-fn field-obj))))))))))
+       (declare (special ,self-sym *endianness-setter*))
+       (flet ((set-endianness (val)
+		(declare (type (member :little-endian :big-endian)))
+		(funcall *endianness-setter* val)))
+	 (declare (ignorable #'set-endianness))
+	 ,@(loop :for field :in fields :collect
+	      (let ((quoted-toplevel (lambda-xform #'quote-when (cons nil (apply-toplevel-op 'quotation (field-raw field))) (field-raw field)))
+		    (quoted-typespec (lambda-xform #'quote-when (cons nil (apply-typespec 'quotation (field-typespec field))) (field-typespec field))))
+		`(let* ((initargs (literal-funcall-typespec initargs ,quoted-typespec))
+			(oos-offset (literal-funcall-toplevel-op out-of-stream-offset ,quoted-toplevel))
+			(offset (or oos-offset stream-marker))
+			(initial-to-final-xform ,(apply-toplevel-op 'initial-to-final-xform (field-raw field)))
+			(field-obj (apply #'make-instance (append initargs (list :parent obj :offset offset :initial-to-final-fn initial-to-final-xform)))))
+		   (setf (cref obj ',(field-name field)) field-obj)
+		   (when (typep field-obj 'btcontainer)
+		     (pave (when (typep field-obj 'btstructured) (btobj-initial-value field-obj)) field-obj))
+		   (unless oos-offset
+		     (incf stream-marker (funcall (btobj-width-fn field-obj)))))))))))
 
 #| Fact: during fill-value, only leaves need btobj-offset, which is of little wonder. |#
 (defgeneric fill-value (btobject)
+  (:method ((obj btobj))
+    (setf (btobj-final-value obj) (funcall (btobj-initial-to-final-fn obj) obj)))
   (:method ((obj btleaf))
-    (setf (btobj-value obj) (funcall (btleaf-value-fn obj) (btobj-offset obj))))
+    (setf (btobj-initial-value obj) (funcall (btleaf-value-fn obj) (btobj-offset obj)))
+    (call-next-method))
   (:method ((obj btordered)) ;; array type is too weakly specified
     (let ((array (make-array (btordered-dimension obj))))
-      (map-into array #'fill-value (btcontainer-childs obj))
-      array))
+      (setf (btobj-initial-value obj) array)
+      (map-into array #'fill-value (btcontainer-childs obj)))
+    (call-next-method))
   (:method ((obj btstructured))
     (dolist (field (bintype-fields (btstructured-bintype obj)))
-      (funcall (field-setter field) (fill-value (cref obj (field-name field))) (btobj-value obj)))
-    (return-from fill-value (btobj-value obj))))
+      (funcall (field-setter field) (fill-value (cref obj (field-name field))) (btobj-initial-value obj)))
+    (call-next-method)))
 
 #| btstructured/btordered discrepancy! |#
 (defun sub (obj selector)
@@ -233,13 +255,19 @@
 
 (defun value (obj)
   (declare (type btleaf obj))
-  (if (slot-boundp obj 'value)
-      (btobj-value obj) (fill-value obj)))
+  (if (slot-boundp obj 'final-value)
+      (btobj-final-value obj) (fill-value obj)))
 
 (defun parse (bintype *vector* &optional (offset 0) &aux *u16-reader* *u32-reader*)
   (declare (dynamic-extent btstructured) (special *u16-reader* *u32-reader* *vector*))
   (let* ((instance (funcall (bintype-instantiator bintype)))
-	 (btstructured (make-instance 'btstructured :bintype bintype :value instance :offset offset)))
+	 (btstructured (make-instance 'btstructured :bintype bintype :initial-value instance :offset offset))
+	 (*endianness-setter* (lambda (val)
+				(setf (values *u16-reader* *u32-reader*)
+				      (ecase val
+					(:little-endian (values #'u8-vector-word16le #'u8-vector-word32le))
+					(:big-endian (values #'u8-vector-word16be #'u8-vector-word32be)))))))
+    (declare (special *endianness-setter*))
     (pave instance btstructured)
     (fill-value btstructured)))
 
@@ -266,7 +294,7 @@
 	     (let ((bintype (bintype ',type-name)))
 	       (list 'btstructured
 		     :bintype bintype
-		     :value (funcall (bintype-instantiator bintype)))
+		     :initial-value (funcall (bintype-instantiator bintype)))
 	             ',type-name))
 	   (cl-type ()
 	       ',type-name)
