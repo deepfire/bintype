@@ -4,6 +4,6 @@
 (in-package :bintype.system)
 
 (defsystem :bintype
-  :depends-on (:alexandria :pergamum :captured-stream :semi-precious)
+  :depends-on (:alexandria :pergamum :typeext)
   :components
   ((:file "bintype")))
