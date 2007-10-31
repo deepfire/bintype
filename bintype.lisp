@@ -21,9 +21,6 @@
 (defclass btcontainer (btobj)
   ((childs :accessor btcontainer-childs :initarg :childs)))
 
-(defun btcontainer-paved-p (container)
-  (not (null (btcontainer-childs container))))
-
 (defclass btordered (btcontainer)
   ((dimension :accessor btordered-dimension :initarg :dimension)
    (stride :accessor btordered-stride :initarg :stride)
@@ -278,8 +275,6 @@
     
 (defun sub (obj selector)
   (declare (type btcontainer obj))
-  (unless (btcontainer-paved-p obj)
-      (pave nil obj))
   (cref obj selector))
 
 (defun value (obj)
