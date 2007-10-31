@@ -2,7 +2,7 @@
   (:use :common-lisp :alexandria :pergamum :iterate)
   (:export
    #:bintype #:defbintype #:parse #:export-bintype-accessors
-   #:match #:plain
+   #:match #:plain #:indirect #:zero-terminated-string #:zero-terminated-symbol
    #:set-endianness #:offset #:parent #:sub #:value))
 
 (in-package :bintype)
@@ -93,7 +93,10 @@
   (:method ((btcontainer btordered) (sel integer))
     (elt (btcontainer-childs btcontainer) sel))
   (:method ((btcontainer btstructured) (sel symbol))
-    (gethash sel (btcontainer-childs btcontainer))))
+    (let ((val (gethash sel (btcontainer-childs btcontainer))))
+      (unless val
+	(error "BTSTRUCTURED ~S has no field called ~S." btcontainer sel))
+      val)))
 
 (defgeneric (setf cref) (val container sel)
   (:documentation "Set a child of a BTCONTAINER.")
@@ -131,19 +134,31 @@
   
 (defun consume-zero-terminated-string (vector offset dimension)
   (let ((search-stop (min (+ offset dimension) (length vector))))
-    (subseq vector offset (or (position 0 vector :start offset :end search-stop) search-stop))))
+    (coerce (iter (for i from offset below (or (position 0 vector :start offset :end search-stop) search-stop))
+		  (collect (code-char (elt vector i))))
+	    'string)))
   
 (define-evaluations typespec zero-terminated-string (dimension)
   (initargs (dimension)
-    (list 'btleaf
-	  :value-fn (lambda (offset)
-		      (declare (special *vector*))
-		      (consume-zero-terminated-string *vector* offset dimension))
-	  :width-fn (lambda () dimension)))
+    (list 'btleaf :value-fn (lambda (offset)
+			      (declare (special *vector*))
+			      (consume-zero-terminated-string *vector* offset dimension))
+		  :width-fn (lambda () dimension)))
   (cl-type ()
     'string)
   (quotation ()
     '(nil)))
+
+(define-evaluations typespec zero-terminated-symbol (dimension &optional (package :keyword))
+  (initargs (dimension package)
+    (list 'btleaf :value-fn (lambda (offset)
+			      (declare (special *vector*))
+			      (intern (string-upcase (consume-zero-terminated-string *vector* offset dimension)) package))
+		  :width-fn (lambda () dimension)))
+  (cl-type (package)
+    (if (eq package :keyword) 'keyword 'symbol))
+  (quotation ()
+    '(nil &rest nil)))
 
 (define-evaluations typespec sequence (dimension &key element-type stride (format :list))
   (initargs (dimension element-type stride)
@@ -186,7 +201,7 @@
 (define-evaluation-domain toplevel-op)
 
 ;; circularity: emit-toplevel-pavement -> toplevel-op indirect -> e-t-p.
-(defun emit-toplevel-pavement (package bintype-name toplevel &aux (self-sym (intern "*SELF*" package)))
+(defun emit-toplevel-pavement (package bintype-name toplevel &key force-specified-toplevel &aux (self-sym (intern "*SELF*" package)))
   (let ((name (apply-toplevel-op 'name toplevel))
 	(typespec (apply-toplevel-op 'typespec toplevel)))
     (let ((quoted-toplevel (lambda-xform #'quote-when (cons nil (apply-toplevel-op 'quotation toplevel)) toplevel))
@@ -196,12 +211,15 @@
 	   (let* ((,o-o-s-offset (literal-funcall-toplevel-op out-of-stream-offset ,quoted-toplevel))
 		  (,initargs (literal-funcall-typespec initargs ,quoted-typespec))
 		  (field-obj (apply #'make-instance (first ,initargs) :offset (or ,o-o-s-offset ,start-offset) :parent ,self-sym
-								      :toplevel (load-time-value (bintype-toplevel (bintype ',bintype-name) ',name))
+								      :toplevel ,(if force-specified-toplevel
+										     `',toplevel
+										     `(load-time-value (bintype-toplevel (bintype ',bintype-name) ',name)))
 								      :initial-to-final-fn ,(apply-toplevel-op 'initial-to-final-xform toplevel)
 								      (rest ,initargs))))
-	     (if ,o-o-s-offset
-		 ,start-offset
-		 (+ ,start-offset (funcall (width-fn field-obj))))))))))
+	     (values (if ,o-o-s-offset
+			 ,start-offset
+			 (+ ,start-offset (funcall (width-fn field-obj))))
+		     field-obj)))))))
   
 (defun output-pave-method (name toplevels &aux (package (symbol-package name)) (self-sym (intern "*SELF*" package)))
   `(defmethod pave ((instance ,name) (obj btstructured) &aux (,self-sym obj))
@@ -215,7 +233,7 @@
 (define-evaluations toplevel-op value (name typespec &key ignore out-of-stream-offset)
   (name (name)					name)
   (typespec (typespec)				typespec)
-  (cl-type (typespec)				`(or null ,(apply-typespec 'cl-type typespec)))
+  (cl-type-for-field (typespec)			`(or null ,(apply-typespec 'cl-type typespec)))
   (emits-field-p (ignore)			(null ignore))
   (out-of-stream-offset (out-of-stream-offset)	out-of-stream-offset)
   (quotation ()					'(t t &rest nil))
@@ -235,24 +253,34 @@
 (define-evaluations toplevel-op match (name typespec values &key ignore out-of-stream-offset)
   (name (name)					name)
   (typespec (typespec)				typespec)
-  (cl-type ()					'(or null keyword))
+  (cl-type-for-field ()				'(or null keyword))
   (emits-field-p (ignore)			(null ignore))
   (out-of-stream-offset (out-of-stream-offset)	out-of-stream-offset)
   (quotation ()					'(t t t &rest nil))
   (immediate-eval (values)			t)
   (initial-to-final-xform (values) 		(emit-lambda '(val obj) (list (emit-match-cond/case 'val values)) :declarations '((ignore obj)))))
 
-(define-evaluations toplevel-op indirect (direct-typespec result-toplevel &key ignore out-of-stream-offset)
+(define-evaluations toplevel-op indirect (direct-typespec result-toplevel &key ignore out-of-stream-offset final-value)
   (name (result-toplevel)			(apply-toplevel-op 'name result-toplevel))
-  (typespec (result-toplevel)			(apply-toplevel-op 'typespec result-toplevel))
-  (cl-type (result-toplevel)			(apply-toplevel-op 'cl-type result-toplevel))
+  (typespec (direct-typespec result-toplevel final-value)
+	    					(if final-value
+						    (apply-toplevel-op 'typespec result-toplevel)
+						    direct-typespec))
+  (cl-type-for-field (result-toplevel)		(apply-toplevel-op 'cl-type-for-field result-toplevel))
   (emits-field-p (ignore)			(null ignore))
   (out-of-stream-offset (out-of-stream-offset)	out-of-stream-offset)
   (quotation ()					'(t t &rest nil))
   (immediate-eval (result-toplevel)		(apply-toplevel-op 'immediate-eval result-toplevel))
-  (initial-to-final-xform (result-toplevel)	`(compose ,(apply-toplevel-op 'initial-to-final-xform result-toplevel)
-							  (lambda (*direct-value* obj)
-							    (fill-value obj)))))
+  (initial-to-final-xform (result-toplevel)	(let* ((package (symbol-package (apply-toplevel-op 'name result-toplevel)))
+						       (self-sym (intern "*SELF*" package)) (direct-sym (intern "*DIRECT-VALUE*" package)))
+						  (with-gensyms (obj)
+						   `(compose ,(apply-toplevel-op 'initial-to-final-xform result-toplevel)
+							     ,(emit-lambda `(,direct-sym ,obj &aux (,self-sym (parent ,obj)))
+									   `( ;; (unless (boundp ',(intern "*SELF*" package)) (error "Totally mysterious!"))
+									     (fill-value (nth-value 1 (funcall ,(emit-toplevel-pavement package nil result-toplevel
+																	:force-specified-toplevel t)
+													       (offset ,obj)))))
+									   :declarations `((special ,self-sym ,direct-sym))))))))
 
 #| Fact: during fill-value, only leaves need offset, which is of little wonder. |#
 (defgeneric fill-value (btobject)
@@ -294,7 +322,7 @@
 
 (defmacro defbintype (type-name &body f)
   (flet ((output-defstruct-field (toplevel)
-	   `(,(apply-toplevel-op 'name toplevel) nil :type ,(apply-toplevel-op 'cl-type toplevel))))
+	   `(,(apply-toplevel-op 'name toplevel) nil :type ,(apply-toplevel-op 'cl-type-for-field toplevel))))
     (let* ((documentation (cadr (assoc :documentation f)))
 	   (toplevels (cdr (assoc :fields f)))
 	   (producing-toplevels (remove-if-not (curry #'apply-toplevel-op 'emits-field-p) toplevels)))
