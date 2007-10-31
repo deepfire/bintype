@@ -12,15 +12,11 @@
 (defclass btobj ()
   ((offset :accessor offset :initarg :offset)
    (parent :accessor parent :initarg :parent)
-   (sub-id :accessor sub-id :initarg :sub-id)
-   (cl-type :accessor cl-type :initarg :cl-type)
-   (immediate-eval :accessor immediate-eval :initarg :immediate-eval)
+   (toplevel :accessor toplevel :initarg :toplevel)
    (width-fn :accessor width-fn :initarg :width-fn)
    (initial-to-final-fn :accessor initial-to-final-fn :initarg :initial-to-final-fn)
    (initial-value :accessor initial-value :initarg :initial-value)
-   (final-value :accessor final-value :initarg :final-value))
-  (:default-initargs
-   :immediate-eval nil))
+   (final-value :accessor final-value :initarg :final-value)))
 
 (defclass btcontainer (btobj)
   ((childs :accessor btcontainer-childs :initarg :childs)))
@@ -37,7 +33,7 @@
   ((bintype :accessor btstructured-bintype :initarg :bintype))
   (:default-initargs
    :childs (make-hash-table)
-   :initial-to-final-fn #'identity))
+   :initial-to-final-fn #'values))
 
 (defclass btleaf (btobj)
   ((value-fn :accessor btleaf-value-fn :initarg :value-fn)))
@@ -80,14 +76,19 @@
 	  (when (slot-boundp o 'offset)
 	    (offset o))))
 
-(defmethod initialize-instance :after ((obj btobj) &rest rest)
+(defmethod initialize-instance :after ((obj btobj) &rest rest &key sequence-index)
   (declare (ignore rest))
   (when (and (slot-boundp obj 'parent) (parent obj))
-    (setf (cref (parent obj) (sub-id obj)) obj))
+    (setf (cref (parent obj)
+		(etypecase (parent obj)
+		  (btordered sequence-index)
+		  (btstructured (apply-toplevel-op 'name (toplevel obj)))))
+	  obj))
   (typecase obj
     (btstructured (pave (setf (initial-value obj) (funcall (bintype-instantiator (btstructured-bintype obj)))) obj))
-    (btordered (pave nil obj)))
-  (when (immediate-eval obj)
+    (btordered    (pave nil obj)))
+  (when (and (slot-boundp obj 'parent) (parent obj) (typep (parent obj) 'btstructured)
+	     (apply-toplevel-op 'immediate-eval (toplevel obj)))
     (fill-value obj)))
 
 (defgeneric cref (container sel)
@@ -174,18 +175,21 @@
       (error "Unable to find the requested bintype ~S." name))
     ret))
 
+(defun bintype-toplevel (bintype name)
+  (find name (bintype-toplevels bintype) :key (curry #'apply-toplevel-op 'name)))
+
 (defgeneric pave (something obj)
   (:method (something (obj btordered))
     (declare (ignore something))
     (let ((initargs (apply-typespec 'initargs (btordered-element-type obj))))
       (iter (for i below (btordered-dimension obj))
 	    (for offset from (offset obj) by (btordered-stride obj))
-	    (apply #'make-instance (first initargs) :sub-id i :offset offset :parent obj :initial-to-final-fn #'identity (rest initargs))))))
+	    (apply #'make-instance (first initargs) :offset offset :parent obj :initial-to-final-fn #'values :sequence-index i :allow-other-keys t (rest initargs))))))
 
 (define-evaluation-domain toplevel-op)
 
 ;; circularity: emit-toplevel-pavement -> toplevel-op indirect -> e-t-p.
-(defun emit-toplevel-pavement (package toplevel &aux (self-sym (intern "*SELF*" package)))
+(defun emit-toplevel-pavement (package bintype-name toplevel &aux (self-sym (intern "*SELF*" package)))
   (let ((name (apply-toplevel-op 'name toplevel))
 	(typespec (apply-toplevel-op 'typespec toplevel)))
     (let ((quoted-toplevel (lambda-xform #'quote-when (cons nil (apply-toplevel-op 'quotation toplevel)) toplevel))
@@ -194,9 +198,8 @@
 	`(lambda (,start-offset)
 	   (let* ((,o-o-s-offset (literal-funcall-toplevel-op out-of-stream-offset ,quoted-toplevel))
 		  (,initargs (literal-funcall-typespec initargs ,quoted-typespec))
-		  (field-obj (apply #'make-instance (first ,initargs) :sub-id ',name :offset (or ,o-o-s-offset ,start-offset)
-								      :parent ,self-sym :immediate-eval ,(apply-toplevel-op 'immediate-eval toplevel)
-								      :cl-type ',(apply-typespec 'cl-type typespec)
+		  (field-obj (apply #'make-instance (first ,initargs) :offset (or ,o-o-s-offset ,start-offset) :parent ,self-sym
+								      :toplevel (load-time-value (bintype-toplevel (bintype ',bintype-name) ',name))
 								      :initial-to-final-fn ,(apply-toplevel-op 'initial-to-final-xform toplevel)
 								      (rest ,initargs))))
 	     (if ,o-o-s-offset
@@ -210,7 +213,7 @@
 	      (declare (type (member :little-endian :big-endian)))
 	      (funcall *endianness-setter* val)))
        (declare (ignorable #'set-endianness))
-       (funcall (compose ,@(mapcar (curry #'emit-toplevel-pavement package) (reverse toplevels))) (offset obj)))))
+       (funcall (compose ,@(mapcar (curry #'emit-toplevel-pavement package name) (reverse toplevels))) (offset obj)))))
 
 (define-evaluations toplevel-op value (name typespec &key ignore out-of-stream-offset)
   (name (name)					name)
@@ -220,7 +223,7 @@
   (out-of-stream-offset (out-of-stream-offset)	out-of-stream-offset)
   (quotation ()					'(t t &rest nil))
   (immediate-eval ()				nil)
-  (initial-to-final-xform ()			'#'identity))
+  (initial-to-final-xform ()			'#'values))
 
 (defun emit-match-cond/case (testform matchforms)
   (if (every (compose #'atom #'car) matchforms)
@@ -240,7 +243,7 @@
   (out-of-stream-offset (out-of-stream-offset)	out-of-stream-offset)
   (quotation ()					'(t t t &rest nil))
   (immediate-eval (values)			t)
-  (initial-to-final-xform (values) 		(emit-lambda '(val) (list (emit-match-cond/case 'val values)))))
+  (initial-to-final-xform (values) 		(emit-lambda '(val obj) (list (emit-match-cond/case 'val values)) :declarations '((ignore obj)))))
 
 (define-evaluations toplevel-op indirect (direct-typespec result-toplevel &key ignore out-of-stream-offset)
   (name (result-toplevel)			(apply-toplevel-op 'name result-toplevel))
@@ -251,31 +254,28 @@
   (quotation ()					'(t t &rest nil))
   (immediate-eval (result-toplevel)		(apply-toplevel-op 'immediate-eval result-toplevel))
   (initial-to-final-xform (result-toplevel)	`(compose ,(apply-toplevel-op 'initial-to-final-xform result-toplevel)
-							  (lambda (*direct-value*)
-							    (fill-value )))))
-
-(defun toplevel (bintype name)
-  (find name (bintype-toplevels bintype) :key (curry #'apply-toplevel-op 'name)))
+							  (lambda (*direct-value* obj)
+							    (fill-value obj)))))
 
 #| Fact: during fill-value, only leaves need offset, which is of little wonder. |#
 (defgeneric fill-value (btobject)
   (:method ((obj btobj))
-    (setf (final-value obj) (funcall (initial-to-final-fn obj) (initial-value obj))))
+    (setf (final-value obj) (funcall (initial-to-final-fn obj) (initial-value obj) obj)))
   (:method ((obj btleaf))
     (setf (initial-value obj) (funcall (btleaf-value-fn obj) (offset obj)))
     (call-next-method))
   (:method ((obj btordered))
-    (setf (initial-value obj) (map (cl-type obj) #'fill-value (btcontainer-childs obj)))
+    (setf (initial-value obj) (map (apply-typespec 'cl-type (apply-toplevel-op 'typespec (toplevel obj)))
+				   #'fill-value (btcontainer-childs obj)))
     (call-next-method))
   (:method ((obj btstructured))
     (let ((bintype (btstructured-bintype obj)))
-      (maphash (lambda (name setter)
-		 (when (apply-toplevel-op 'emits-field-p (toplevel bintype name))
-		   (funcall setter (fill-value (cref obj name)) (initial-value obj))))
-	       (bintype-field-setters (btstructured-bintype obj))))
-    (call-next-method)
-    (final-value obj)))
-
+      (dolist (toplevel (bintype-toplevels bintype))
+	(when (apply-toplevel-op 'emits-field-p toplevel)
+	  (let ((name (apply-toplevel-op 'name toplevel)))
+	    (funcall (gethash name (bintype-field-setters bintype)) (fill-value (cref obj name)) (initial-value obj))))))
+    (call-next-method)))
+    
 (defun sub (obj selector)
   (declare (type btcontainer obj))
   (unless (btcontainer-paved-p obj)
