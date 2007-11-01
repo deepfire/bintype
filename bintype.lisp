@@ -13,7 +13,7 @@
   ((offset :accessor offset :initarg :offset)
    (parent :accessor parent :initarg :parent)
    (toplevel :accessor toplevel :initarg :toplevel)
-   (width-fn :accessor width-fn :initarg :width-fn)
+   (width :accessor width :initarg :width)
    (initial-to-final-fn :accessor initial-to-final-fn :initarg :initial-to-final-fn)
    (initial-value :accessor initial-value :initarg :initial-value)
    (final-value :accessor final-value :initarg :final-value)))
@@ -126,7 +126,7 @@
 		      (8 #'generic-u8-reader)
 		      (16 #'generic-u16-reader)
 		      (32 #'generic-u32-reader))
-	  :width-fn (lambda () (/ width 8))))
+	  :width (/ width 8)))
   (cl-type (width)
     `(unsigned-byte ,width))
   (quotation ()
@@ -143,7 +143,7 @@
     (list 'btleaf :value-fn (lambda (offset)
 			      (declare (special *vector*))
 			      (consume-zero-terminated-string *vector* offset dimension))
-		  :width-fn (lambda () dimension)))
+		  :width dimension))
   (cl-type ()
     'string)
   (quotation ()
@@ -154,7 +154,7 @@
     (list 'btleaf :value-fn (lambda (offset)
 			      (declare (special *vector*))
 			      (intern (string-upcase (consume-zero-terminated-string *vector* offset dimension)) package))
-		  :width-fn (lambda () dimension)))
+		  :width dimension))
   (cl-type (package)
     (if (eq package :keyword) 'keyword 'symbol))
   (quotation ()
@@ -165,7 +165,7 @@
     (list 'btordered
 	  :element-type element-type :dimension dimension :stride stride
 	  :childs (make-array dimension)
-	  :width-fn (lambda () (* stride dimension))))
+	  :width (* stride dimension)))
   (cl-type (element-type format)
     (ecase format
       (:list 'list)
@@ -175,7 +175,7 @@
   
 (defstruct bintype
   (name nil :type symbol)
-  (documentation nil :type string)
+  (documentation nil :type (or null string))
   instantiator
   (field-setters (make-hash-table))
   toplevels)
@@ -205,7 +205,7 @@
   (let ((name (apply-toplevel-op 'name toplevel))
 	(typespec (apply-toplevel-op 'typespec toplevel)))
     (let ((quoted-toplevel (lambda-xform #'quote-when (cons nil (apply-toplevel-op 'quotation toplevel)) toplevel))
-	  (quoted-typespec (lambda-xform #'quote-when (cons nil (apply-typespec 'quotation typespec)) typespec)))
+	  (quoted-typespec (lambda-xform #'quote-when (cons nil (apply-typespec 'quotation typespec)) (mklist typespec))))
       (with-gensyms (start-offset o-o-s-offset initargs)
 	`(lambda (,start-offset)
 	   (let* ((,o-o-s-offset (literal-funcall-toplevel-op out-of-stream-offset ,quoted-toplevel))
@@ -216,9 +216,7 @@
 										     `(load-time-value (bintype-toplevel (bintype ',bintype-name) ',name)))
 								      :initial-to-final-fn ,(apply-toplevel-op 'initial-to-final-xform toplevel)
 								      (rest ,initargs))))
-	     (values (if ,o-o-s-offset
-			 ,start-offset
-			 (+ ,start-offset (funcall (width-fn field-obj))))
+	     (values (+ ,start-offset (if ,o-o-s-offset 0 (width field-obj)))
 		     field-obj)))))))
   
 (defun output-pave-method (name toplevels &aux (package (symbol-package name)) (self-sym (intern "*SELF*" package)))
@@ -228,7 +226,9 @@
 	      (declare (type (member :little-endian :big-endian)))
 	      (funcall *endianness-setter* val)))
        (declare (ignorable #'set-endianness))
-       (funcall (compose ,@(mapcar (curry #'emit-toplevel-pavement package name) (reverse toplevels))) (offset obj)))))
+       (setf (width obj)
+	     (- (funcall (compose ,@(mapcar (curry #'emit-toplevel-pavement package name) (reverse toplevels))) (offset obj))
+		(offset obj))))))
 
 (define-evaluations toplevel-op value (name typespec &key ignore out-of-stream-offset)
   (name (name)					name)
@@ -311,7 +311,7 @@
       (final-value obj) (fill-value obj)))
 
 (defun parse (bintype *vector* &optional (offset 0) &aux *u16-reader* *u32-reader*)
-  (declare (dynamic-extent btstructured) (special *u16-reader* *u32-reader* *vector*))
+  (declare (special *u16-reader* *u32-reader* *vector*))
   (let ((*endianness-setter* (lambda (val)
 			       (setf (values *u16-reader* *u32-reader*)
 				     (ecase val
