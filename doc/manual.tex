@@ -1,0 +1,167 @@
+\documentclass[%
+	%draft,
+	%submission,
+	%compressed,
+	final,
+	%
+	%technote,
+	%internal,
+	%submitted,
+	%inpress,
+	%reprint,
+	%
+	%titlepage,
+	notitlepage,
+	%anonymous,
+	narroweqnarray,
+	inline,
+	twoside,
+        %invited,
+	]{ieee}
+
+\newcommand{\latexiie}{\LaTeX2{\Large$_\varepsilon$}}
+
+%\usepackage{ieeetsp}	% if you want the "trans. sig. pro." style
+%\usepackage{ieeetc}	% if you want the "trans. comp." style
+%\usepackage{ieeeimtc}	% if you want the IMTC conference style
+
+% Use the `endfloat' package to move figures and tables to the end
+% of the paper. Useful for `submission' mode.
+%\usepackage {endfloat}
+
+% Use the `times' package to use Helvetica and Times-Roman fonts
+% instead of the standard Computer Modern fonts. Useful for the 
+% IEEE Computer Society transactions.
+%\usepackage{times}
+% (Note: If you have the commercial package `mathtime,' (from 
+% y&y (http://www.yandy.com), it is much better, but the `times' 
+% package works too). So, if you have it...
+%\usepackage {mathtime}
+
+% for any plug-in code... insert it here. For example, the CDC style...
+%\usepackage{ieeecdc}
+
+\begin{document}
+
+%----------------------------------------------------------------------
+% Title Information, Abstract and Keywords
+%----------------------------------------------------------------------
+\title[BINTYPE Manual]{%
+       BINTYPE Manual}
+
+% format author this way for journal articles.
+% MAKE SURE THERE ARE NO SPACES BEFORE A \member OR \authorinfo
+% COMMAND (this also means `don't break the line before these
+% commands).
+\author[KOSYREV\'{A}R]{Serge Kosyrev\authorinfo{S.\,Kosyrev is employed by Elvees, Moscow,
+	Russia.
+       E-mail: \_deepfire@feelingofgreen.ru}%
+}
+\author[GROMOFF\'{A}R]{Samium Gromoff\authorinfo{S.\,Gromoff is employed by Elvees, Moscow,
+	Russia.
+       E-mail: \_deepfire@feelingofgreen.ru}%
+}
+
+%\journal{IEEE Trans.\ on Instrum.\ Meas.}
+%\titletext{, VOL.\ 46, NO.\ 6, DECEMBER\ 1997}
+%\ieeecopyright{0018--9456/97\$10.00 \copyright\ 1997 IEEE}
+%\lognumber{xxxxxxx}
+%\pubitemident{S 0018--9456(97)09426--6}
+%\loginfo{Manuscript received September 27, 1997.}
+%\firstpage{1217}
+
+%\confplacedate{Ottawa, Canada, May 19--21, 1997}
+
+\maketitle               
+
+\begin{abstract} 
+The impulse behind this project was born out of the perception,
+that writing procedural parser algorithms for binary formats
+is boring, and, as the serialization patterns underlying them are
+largely boilerplate, basically avoidable in a vast number of cases.
+This manual describes a Common Lisp-based domain-specific language for binary
+format specifications, along with a tool, to automatically transform such
+specifications into fully-fledged parsers.
+It is available at \mbox{git://git.feelingofgreen.ru/bintype}.
+\end{abstract}
+
+\begin{keywords}
+Binary formats, serialization, specification-driven parsing.
+\end{keywords}
+
+%----------------------------------------------------------------------
+% SECTION I: Introduction
+%----------------------------------------------------------------------
+\section{Introduction}
+
+\PARstartCal Whenever the problem of data interchange poses itself,
+whether due to the needs of persistence or replication of computation states, 
+
+
+%----------------------------------------------------------------------
+% SECTION ...: Conclusions
+%----------------------------------------------------------------------
+\section{Conclusion}
+
+The BINTYPE tool, described here, is provided on an ``as-is'' basis at
+
+\begin{verbatim}
+  git://git.feelingofgreen.ru/bintype
+\end{verbatim}
+
+\noindent along with its dependency
+
+\begin{verbatim}
+  git://git.feelingofgreen.ru/pergamum
+\end{verbatim}
+
+\noindent Any bug report is welcome, especially if accompanied by the solution!
+Reports should be made, via e-mail, to the author.
+
+%----------------------------------------------------------------------
+% The bibliography. This bibliography was generated using the following
+% two lines:
+%\bibliographystyle{IEEEbib}
+%\bibliography{ieeecls}
+% where, the contents of the ieeecls.bib file was:
+%
+%@book{lamport,
+%        AUTHOR = "Leslie Lamport",
+%         TITLE = "A Document Preparation System: {\LaTeX} User's Guide
+%                  and Reference Manual",
+%       EDITION = "Second",
+%     PUBLISHER = "Addison-Wesley",
+%       ADDRESS = "Reading, MA",
+%          YEAR = 1994,
+%          NOTE = "Be sure to get the updated version for \LaTeX2e!"
+%}
+%
+%@book{goossens,
+%        AUTHOR = "Michel Goossens and Frank Mittelbach and
+%                  Alexander Samarin",
+%         TITLE = "The {\LaTeX} Companion",
+%     PUBLISHER = "Addison-Wesley",
+%       ADDRESS = "Reading, MA",
+%          YEAR = 1994,
+%}
+%
+% The ieeecls.bbl file was manually included here to make the distribution
+% of this paper easier. You need not do it for your own papers.
+
+\begin{thebibliography}{1}
+
+\bibitem{fjeld}
+Frode Vatvedt Fjeld, {\em Binary-types},
+\newblock http://www.cs.uit.no/~frodef/sw/binary-types/; 2003
+
+\bibitem{seibel}
+Peter Seibel, {\em Practical Common Lisp}, ch. 24
+\newblock Apress, 2005. ISBN13: 978-1-59059-239-7
+
+\bibitem{clx}
+CLX developers, {\em CLX}, buffer.lisp, gl.lisp, macros.lisp
+\newblock http://www.cliki.net/CLX, 1987-2007
+
+\end{thebibliography}
+
+\end{document}
