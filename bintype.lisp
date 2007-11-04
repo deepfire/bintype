@@ -119,7 +119,7 @@
   (declare (special *u32-reader* *vector*))
   (funcall *u32-reader* *vector* offset))
 
-(define-evaluations typespec unsigned-byte (width)
+(define-function-evaluations typespec unsigned-byte (width)
   (initargs (width)
     (list 'btleaf
 	  :value-fn (case width
@@ -138,7 +138,7 @@
 		  (collect (code-char (elt vector i))))
 	    'string)))
   
-(define-evaluations typespec zero-terminated-string (dimension)
+(define-function-evaluations typespec zero-terminated-string (dimension)
   (initargs (dimension)
     (list 'btleaf :value-fn (lambda (offset)
 			      (declare (special *vector*))
@@ -149,7 +149,7 @@
   (quotation ()
     '(nil)))
 
-(define-evaluations typespec zero-terminated-symbol (dimension &optional (package :keyword))
+(define-function-evaluations typespec zero-terminated-symbol (dimension &optional (package :keyword))
   (initargs (dimension package)
     (list 'btleaf :value-fn (lambda (offset)
 			      (declare (special *vector*))
@@ -160,7 +160,7 @@
   (quotation ()
     '(nil &rest nil)))
 
-(define-evaluations typespec sequence (dimension &key element-type stride (format :list))
+(define-function-evaluations typespec sequence (dimension &key element-type stride (format :list))
   (initargs (dimension element-type stride)
     (list 'btordered
 	  :element-type element-type :dimension dimension :stride stride
@@ -173,6 +173,20 @@
   (quotation ()
     '(nil &key (element-type t) stride format)))
   
+(define-function-evaluations typespec typecase (dispatch-value &rest types)
+  (cl-type (types)
+    `(or ,@(mapcar (compose (curry #'apply-typespec 'cl-type) #'cadr) types)))
+  (quotation ()
+    `(&rest nil)))
+
+(define-macro-evaluations typespec typecase (dispatch-value &rest types)
+  (initargs (dispatch-value types)
+    (once-only (dispatch-value)
+      `(case ,dispatch-value
+	 ,@(iter (for (signature type) in types)
+		 (collect `(,signature (eval-typespec initargs ,type))))
+	 (t (error "no type for dispatch value ~S" ,dispatch-value))))))
+
 (defstruct bintype
   (name nil :type symbol)
   (documentation nil :type (or null string))
@@ -208,8 +222,8 @@
 	  (quoted-typespec (lambda-xform #'quote-when (cons nil (apply-typespec 'quotation typespec)) (mklist typespec))))
       (with-gensyms (start-offset o-o-s-offset initargs)
 	`(lambda (,start-offset)
-	   (let* ((,o-o-s-offset (literal-funcall-toplevel-op out-of-stream-offset ,quoted-toplevel))
-		  (,initargs (literal-funcall-typespec initargs ,quoted-typespec))
+	   (let* ((,o-o-s-offset (eval-toplevel-op out-of-stream-offset ,quoted-toplevel))
+		  (,initargs (eval-typespec initargs ,quoted-typespec))
 		  (field-obj (apply #'make-instance (first ,initargs) :offset (or ,o-o-s-offset ,start-offset) :parent ,self-sym
 								      :toplevel ,(if force-specified-toplevel
 										     `',toplevel
@@ -230,7 +244,7 @@
 	     (- (funcall (compose ,@(mapcar (curry #'emit-toplevel-pavement package name) (reverse toplevels))) (offset obj))
 		(offset obj))))))
 
-(define-evaluations toplevel-op value (name typespec &key ignore out-of-stream-offset)
+(define-function-evaluations toplevel-op value (name typespec &key ignore out-of-stream-offset)
   (name (name)					name)
   (typespec (typespec)				typespec)
   (cl-type-for-field (typespec)			`(or null ,(apply-typespec 'cl-type typespec)))
@@ -250,7 +264,7 @@
 		       (collect `((null (mismatch ,testform ',testval)) ,@forms)))
 	       (t (error "Value ~S didn't match any of ~S." ,testform ',(mapcar #'car matchforms)))))))
 
-(define-evaluations toplevel-op match (name typespec values &key ignore out-of-stream-offset)
+(define-function-evaluations toplevel-op match (name typespec values &key ignore out-of-stream-offset)
   (name (name)					name)
   (typespec (typespec)				typespec)
   (cl-type-for-field ()				'(or null keyword))
@@ -260,7 +274,7 @@
   (immediate-eval (values)			t)
   (initial-to-final-xform (values) 		(emit-lambda '(val obj) (list (emit-match-cond/case 'val values)) :declarations '((ignore obj)))))
 
-(define-evaluations toplevel-op indirect (direct-typespec result-toplevel &key ignore out-of-stream-offset final-value)
+(define-function-evaluations toplevel-op indirect (direct-typespec result-toplevel &key ignore out-of-stream-offset final-value)
   (name (result-toplevel)			(apply-toplevel-op 'name result-toplevel))
   (typespec (direct-typespec result-toplevel final-value)
 	    					(if final-value
@@ -330,7 +344,7 @@
 	 (setf (gethash ',type-name *bintypes*)
 	       (make-bintype :name ',type-name :documentation ,documentation :toplevels ',toplevels))
 	 (defstruct ,type-name ,@(mapcar #'output-defstruct-field producing-toplevels))
-	 (define-evaluations typespec ,type-name ()
+	 (define-function-evaluations typespec ,type-name ()
 	   (initargs () (list 'btstructured :bintype (bintype ',type-name)))
 	   (cl-type ()  ',type-name)
 	   (quotation))
