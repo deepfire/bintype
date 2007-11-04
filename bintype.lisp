@@ -1,8 +1,9 @@
 (defpackage bintype
   (:use :common-lisp :alexandria :pergamum :iterate)
   (:export
-   #:bintype #:defbintype #:parse #:export-bintype-accessors
-   #:match #:plain #:indirect #:zero-terminated-string #:zero-terminated-symbol
+   #:bintype #:define-primitive-type #:defbintype #:parse #:export-bintype-accessors
+   #:match #:plain #:indirect
+   #:current-offset #:zero-terminated-string #:zero-terminated-symbol #:irregular-sequence
    #:set-endianness #:offset #:parent #:sub #:value))
 
 (in-package :bintype)
@@ -23,8 +24,13 @@
 
 (defclass btordered (btcontainer)
   ((dimension :accessor btordered-dimension :initarg :dimension)
-   (stride :accessor btordered-stride :initarg :stride)
    (element-type :accessor btordered-element-type :initarg :element-type)))
+
+(defclass btregular (btordered)
+  ((stride :accessor btregular-stride :initarg :stride)))
+
+(defclass btirregular (btordered)
+  ((stride-fn :accessor btirregular-stride-fn :initarg :stride-fn)))
 
 (defclass btstructured (btcontainer)
   ((bintype :accessor btstructured-bintype :initarg :bintype))
@@ -53,12 +59,12 @@
 ;;            \
 ;;             E  -  this object is un-paveable, unless ...
 
-(defmethod print-object ((o btordered) s)
-  (format s "#<BTORDERED {~X} offset: ~X dimension: ~D stride: ~D element-type: ~S>"
+(defmethod print-object ((o btregular) s)
+  (format s "#<BTREGULAR {~X} offset: ~X dimension: ~D stride: ~D element-type: ~S>"
 	  (sb-vm::get-lisp-obj-address o)
 	  (when (slot-boundp o 'offset)
 	    (offset o))
-	  (btordered-dimension o) (btordered-stride o) (btordered-element-type o)))
+	  (btordered-dimension o) (btregular-stride o) (btordered-element-type o)))
 
 (defmethod print-object ((o btstructured) s)
   (format s "#<BTSTRUCTURED {~X} offset: ~X bintype: ~S>"
@@ -105,8 +111,6 @@
   (:method (val (btcontainer btstructured) (sel symbol))
     (setf (gethash sel (btcontainer-childs btcontainer)) val)))
 
-(define-evaluation-domain typespec)
-
 (defun generic-u8-reader (offset)
   (declare (special *vector*))
   (elt *vector* offset))
@@ -119,68 +123,124 @@
   (declare (special *u32-reader* *vector*))
   (funcall *u32-reader* *vector* offset))
 
-(define-function-evaluations typespec unsigned-byte (width)
-  (initargs (width)
+(defparameter *primitive-types* (make-hash-table :test #'eq))
+
+(defun primitive-type-p (type)
+  (op-parameter-destructurer (op params) type
+    (declare (ignore params))
+    (gethash op *primitive-types*)))
+
+(defmacro define-primitive-type (name lambda-list &body body)
+  (let ((functions (remove-if-not (compose (curry #'eq 'defun) #'car) body))
+	(macros (remove-if-not (compose (curry #'eq 'defmacro) #'car) body)))
+    `(progn
+       (when (primitive-type-p ',name)
+	 (warn "redefining ~S in DEFINE-PRIMITIVE-TYPE" ',name))
+       (setf (gethash ',name *primitive-types*) t)
+       ,@(when functions
+	   `((define-function-evaluations typespec ,name ,lambda-list
+	       ,@(mapcar #'rest functions))))
+       ,@(when macros
+	   `((define-macro-evaluations typespec ,name ,lambda-list
+	       ,@(mapcar #'rest macros)))))))
+
+(define-evaluation-domain typespec)
+
+(define-primitive-type unsigned-byte (width)
+  (defun constant-width (width) (/ width 8))
+  (defun initargs (width)
     (list 'btleaf
 	  :value-fn (case width
 		      (8 #'generic-u8-reader)
 		      (16 #'generic-u16-reader)
 		      (32 #'generic-u32-reader))
 	  :width (/ width 8)))
-  (cl-type (width)
+  (defun cl-type (width)
     `(unsigned-byte ,width))
-  (quotation ()
+  (defun quotation ()
     '(nil)))
   
+(define-primitive-type current-offset (width)
+  (defun constant-width () 0)
+  (defun initargs ()
+    (list 'btleaf :value-fn (lambda (offset) offset) :width 0))
+  (defun cl-type (width)
+    `(unsigned-byte ,width))
+  (defun quotation ()
+    '(nil)))
+
 (defun consume-zero-terminated-string (vector offset dimension)
   (let ((search-stop (min (+ offset dimension) (length vector))))
     (coerce (iter (for i from offset below (or (position 0 vector :start offset :end search-stop) search-stop))
 		  (collect (code-char (elt vector i))))
 	    'string)))
   
-(define-function-evaluations typespec zero-terminated-string (dimension)
-  (initargs (dimension)
+(define-primitive-type zero-terminated-string (dimension)
+  (defun constant-width (dimension) dimension)
+  (defun initargs (dimension)
     (list 'btleaf :value-fn (lambda (offset)
 			      (declare (special *vector*))
 			      (consume-zero-terminated-string *vector* offset dimension))
 		  :width dimension))
-  (cl-type ()
+  (defun cl-type ()
     'string)
-  (quotation ()
+  (defun quotation ()
     '(nil)))
 
-(define-function-evaluations typespec zero-terminated-symbol (dimension &optional (package :keyword))
-  (initargs (dimension package)
+(define-primitive-type zero-terminated-symbol (dimension &optional (package :keyword))
+  (defun constant-width (dimension) dimension)
+  (defun initargs (dimension package)
     (list 'btleaf :value-fn (lambda (offset)
 			      (declare (special *vector*))
 			      (intern (string-upcase (consume-zero-terminated-string *vector* offset dimension)) package))
 		  :width dimension))
-  (cl-type (package)
+  (defun cl-type (package)
     (if (eq package :keyword) 'keyword 'symbol))
-  (quotation ()
+  (defun quotation ()
     '(nil &rest nil)))
 
-(define-function-evaluations typespec sequence (dimension &key element-type stride (format :list))
-  (initargs (dimension element-type stride)
-    (list 'btordered
-	  :element-type element-type :dimension dimension :stride stride
-	  :childs (make-array dimension)
-	  :width (* stride dimension)))
-  (cl-type (element-type format)
+(define-primitive-type sequence (dimension &key element-type stride (format :list))
+  (defun constant-width () nil)
+  (defun initargs (dimension element-type stride)
+    (unless (primitive-type-p element-type)
+      (error "unknown sequence element type ~S." element-type))
+    (let ((stride (or stride (apply-typespec 'constant-width element-type)
+		      (error "sequence stride must be specified for non-constant-width element types."))))
+      (list 'btregular
+	    :element-type element-type :dimension dimension :stride stride
+	    :childs (make-array dimension)
+	    :width (* stride dimension))))
+  (defun cl-type (element-type format)
     (ecase format
       (:list 'list)
       (:vector `(vector ,(apply-typespec 'cl-type element-type)))))
-  (quotation ()
+  (defun quotation ()
     '(nil &key (element-type t) stride format)))
-  
-(define-function-evaluations typespec typecase (dispatch-value &rest types)
-  (cl-type (types)
-    `(or ,@(mapcar (compose (curry #'apply-typespec 'cl-type) #'cadr) types)))
-  (quotation ()
-    `(&rest nil)))
 
-(define-macro-evaluations typespec typecase (dispatch-value &rest types)
-  (initargs (dispatch-value types)
+(define-primitive-type irregular-sequence (dimension &key element-type stride-fn (format :list))
+  (defun constant-width () nil)
+  (defun initargs (dimension element-type stride-fn)
+    (unless (primitive-type-p element-type)
+      (error "unknown sequence element type ~S." element-type))
+    (list 'btirregular
+	  :element-type element-type :dimension dimension :stride-fn stride-fn
+	  :childs (make-array dimension)
+	  :width (iter (for i below dimension)
+		       (summing (funcall stride-fn i)))))
+  (defun cl-type (element-type format)
+    (ecase format
+      (:list 'list)
+      (:vector `(vector ,(apply-typespec 'cl-type element-type)))))
+  (defun quotation ()
+    '(nil &key (element-type t) stride-fn format)))
+
+(define-primitive-type typecase (dispatch-value &rest types)
+  (defun constant-width () nil)
+  (defun cl-type (types)
+    `(or ,@(mapcar (compose (curry #'apply-typespec 'cl-type) #'cadr) types)))
+  (defun quotation ()
+    `(&rest nil))
+  (defmacro initargs (dispatch-value types)
     (once-only (dispatch-value)
       `(case ,dispatch-value
 	 ,@(iter (for (signature type) in types)
@@ -204,12 +264,23 @@
 (defun bintype-toplevel (bintype name)
   (find name (bintype-toplevels bintype) :key (curry #'apply-toplevel-op 'name)))
 
+(defun btstructured-constant-width (type-name)
+  (reduce #'(lambda (x y) (when (and x y) (+ x y)))
+	  (mapcar (compose (curry #'apply-typespec 'constant-width) (curry #'apply-toplevel-op 'typespec))
+		  (bintype-toplevels (bintype type-name)))))
+
 (defgeneric pave (something obj)
-  (:method (something (obj btordered))
+  (:method (something (obj btregular))
     (declare (ignore something))
     (let ((initargs (apply-typespec 'initargs (btordered-element-type obj))))
       (iter (for i below (btordered-dimension obj))
-	    (for offset from (offset obj) by (btordered-stride obj))
+	    (for offset from (offset obj) by (btregular-stride obj))
+	    (apply #'make-instance (first initargs) :offset offset :parent obj :initial-to-final-fn #'values :sequence-index i :allow-other-keys t (rest initargs)))))
+  (:method (something (obj btirregular))
+    (declare (ignore something))
+    (let ((initargs (apply-typespec 'initargs (btordered-element-type obj))))
+      (iter (for i below (btordered-dimension obj))
+	    (for offset initially (offset obj) then (+ offset (funcall (btirregular-stride-fn obj) i)))
 	    (apply #'make-instance (first initargs) :offset offset :parent obj :initial-to-final-fn #'values :sequence-index i :allow-other-keys t (rest initargs))))))
 
 (define-evaluation-domain toplevel-op)
@@ -233,13 +304,21 @@
 	     (values (+ ,start-offset (if ,o-o-s-offset 0 (width field-obj)))
 		     field-obj)))))))
   
-(defun output-pave-method (name toplevels &aux (package (symbol-package name)) (self-sym (intern "*SELF*" package)))
-  `(defmethod pave ((instance ,name) (obj btstructured) &aux (,self-sym obj))
-     (declare (special ,self-sym *endianness-setter*))
+(defun output-pave-method (name toplevels total-length &aux (package (symbol-package name))
+			   (self-sym (intern "*SELF*" package)) (total-len-sym (intern "*TOTAL-LENGTH*" package)))
+  `(defmethod pave ((instance ,name) (obj btstructured) &aux (,self-sym obj) ,@(when total-length `(,total-len-sym)))
+     (declare (special ,self-sym *endianness-setter* *vector*))
      (flet ((set-endianness (val)
 	      (declare (type (member :little-endian :big-endian)))
 	      (funcall *endianness-setter* val)))
        (declare (ignorable #'set-endianness))
+       (format t "vector is ~S~%" (type-of *vector*))
+       ,@(case total-length
+	   (:length `((setf ,total-len-sym (length *vector*))))
+	   (:array-dimension `((unless (subtypep (type-of *vector*) 'vector) (error "this bintype requires the sequence to be a vector."))
+			       (setf ,total-len-sym (array-dimension *vector* 0))))
+	   ((nil))
+	   (t (error "total-length must be of type (member :array-dimension), was ~S." total-length)))
        (setf (width obj)
 	     (- (funcall (compose ,@(mapcar (curry #'emit-toplevel-pavement package name) (reverse toplevels))) (offset obj))
 		(offset obj))))))
@@ -324,7 +403,7 @@
   (if (slot-boundp obj 'final-value)
       (final-value obj) (fill-value obj)))
 
-(defun parse (bintype *vector* &optional (offset 0) &aux *u16-reader* *u32-reader*)
+(defun parse (bintype *vector* &optional (endianness :little-endian) (offset 0) &aux *u16-reader* *u32-reader*)
   (declare (special *u16-reader* *u32-reader* *vector*))
   (let ((*endianness-setter* (lambda (val)
 			       (setf (values *u16-reader* *u32-reader*)
@@ -332,22 +411,25 @@
 				       (:little-endian (values #'u8-seq-word16le #'u8-seq-word32le))
 				       (:big-endian (values #'u8-seq-word16be #'u8-seq-word32be)))))))
     (declare (special *endianness-setter*))
+    (funcall *endianness-setter* endianness)
     (fill-value (make-instance 'btstructured :bintype bintype :initial-value (funcall (bintype-instantiator bintype)) :offset offset))))
 
 (defmacro defbintype (type-name &body f)
   (flet ((output-defstruct-field (toplevel)
 	   `(,(apply-toplevel-op 'name toplevel) nil :type ,(apply-toplevel-op 'cl-type-for-field toplevel))))
     (let* ((documentation (cadr (assoc :documentation f)))
+	   (total-length (cadr (assoc :total-length f)))
 	   (toplevels (cdr (assoc :fields f)))
 	   (producing-toplevels (remove-if-not (curry #'apply-toplevel-op 'emits-field-p) toplevels)))
       `(progn
 	 (setf (gethash ',type-name *bintypes*)
 	       (make-bintype :name ',type-name :documentation ,documentation :toplevels ',toplevels))
 	 (defstruct ,type-name ,@(mapcar #'output-defstruct-field producing-toplevels))
-	 (define-function-evaluations typespec ,type-name ()
-	   (initargs () (list 'btstructured :bintype (bintype ',type-name)))
-	   (cl-type ()  ',type-name)
-	   (quotation))
+	 (define-primitive-type ,type-name ()
+	   (defun constant-width () (btstructured-constant-width ',type-name))
+	   (defun initargs () (list 'btstructured :bintype (bintype ',type-name)))
+	   (defun cl-type () ',type-name)
+	   (defun quotation ()))
 	 (let* ((bintype (bintype ',type-name)))
 	   (dolist (toplevel (bintype-toplevels bintype))
 	     (when (apply-toplevel-op 'emits-field-p toplevel)
@@ -356,7 +438,7 @@
 		 (setf (gethash field-name (bintype-field-setters bintype)) (fdefinition `(setf ,setter-name))))))
 	   (setf (bintype-instantiator bintype)
 		 (fdefinition ',(format-symbol (symbol-package type-name) "MAKE-~A" type-name)))
-	   ,(output-pave-method type-name toplevels))))))
+	   ,(output-pave-method type-name toplevels total-length))))))
 
 (defun export-bintype-accessors (bintype)
   (let ((bintype-name (bintype-name bintype)))
