@@ -419,12 +419,27 @@
   (if (slot-boundp obj 'final-value)
       (final-value obj) (fill-value obj)))
 
+(defun find-parent-by-type (base type-name)
+  (labels ((iterate (current)
+		    (cond ((and (typep current 'btstructured)
+				(eq type-name (bintype-name (btstructured-bintype current))))
+			   current)
+			  ((not (slot-boundp current 'parent))
+			   (error "no parent of type ~S for ~S" type-name base))
+			  (t
+			   (iterate (parent current))))))
+    (unless (slot-boundp base 'parent)
+      (error "no parent of type ~S for ~S" type-name base))
+    (iterate (parent base))))
+
 (defun path-value (current &rest designators)
   (labels ((iterate (current designators)
 		    (cond ((null designators)
 			   (value current))
 			  ((eq (first designators) :parent)
 			   (iterate (parent current) (rest designators)))
+			  ((and (consp (first designators)) (eq (caar designators) :typed-parent))
+			   (iterate (find-parent-by-type current (cadar designators)) (rest designators)))
 			  (t
 			   (iterate (sub current (first designators)) (rest designators))))))
     (iterate current designators)))
