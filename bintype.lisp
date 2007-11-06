@@ -366,7 +366,8 @@
   (out-of-stream-offset (out-of-stream-offset)	out-of-stream-offset)
   (quotation ()					'(t t t &rest nil))
   (immediate-eval (values)			t)
-  (initial-to-final-xform (values) 		(emit-lambda '(val obj) (list (emit-match-cond/case 'val values)) :declarations '((ignore obj)))))
+  (initial-to-final-xform (values) 		(emit-lambda '(val obj) (list (emit-match-cond/case 'val values))
+							     :declarations (emit-declarations :ignore '(obj)))))
 
 (define-function-evaluations toplevel-op indirect (direct-typespec result-toplevel &key ignore out-of-stream-offset final-value)
   (name (result-toplevel)			(apply-toplevel-op 'name result-toplevel))
