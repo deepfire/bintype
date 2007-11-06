@@ -348,14 +348,17 @@
   (immediate-eval ()				nil)
   (initial-to-final-xform ()			'#'values))
 
+(defun case-able (obj)
+  (typep obj '(or number symbol)))
+
 (defun emit-match-cond/case (testform matchforms)
-  (if (every (compose #'atom #'car) matchforms)
+  (if (every (compose #'case-able #'car) matchforms)
       `(case ,testform
 	 ,@matchforms
-	 (default (error "Value ~S didn't match any of ~S." ,testform ',matchforms)))
+	 (t (error "Value ~S didn't match any of ~S." ,testform ',matchforms)))
       (once-only (testform)
 	`(cond ,@(iter (for (testval . forms) in matchforms)
-		       (collect `((null (mismatch ,testform ',testval)) ,@forms)))
+		       (collect `((null (mismatch ,testform ',testval)) ,@(or forms (list nil)))))
 	       (t (error "Value ~S didn't match any of ~S." ,testform ',(mapcar #'car matchforms)))))))
 
 (define-function-evaluations toplevel-op match (name typespec values &key ignore out-of-stream-offset)
