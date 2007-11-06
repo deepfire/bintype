@@ -4,7 +4,7 @@
    #:bintype #:define-primitive-type #:defbintype #:parse #:export-bintype-accessors
    #:match #:plain #:indirect
    #:pure #:current-offset #:zero-terminated-string #:zero-terminated-symbol #:irregular-sequence
-   #:set-endianness #:offset #:parent #:sub #:value))
+   #:set-endianness #:offset #:parent #:sub #:value #:path-value))
 
 (in-package :bintype)
 
@@ -418,6 +418,16 @@
   (declare (type btobj obj))
   (if (slot-boundp obj 'final-value)
       (final-value obj) (fill-value obj)))
+
+(defun path-value (current &rest designators)
+  (labels ((iterate (current designators)
+		    (cond ((null designators)
+			   (value current))
+			  ((eq (first designators) :parent)
+			   (iterate (parent current) (rest designators)))
+			  (t
+			   (iterate (sub current (first designators)) (rest designators))))))
+    (iterate current designators)))
 
 (defun parse (bintype *vector* &optional (endianness :little-endian) (offset 0) &aux *u16-reader* *u32-reader*)
   (declare (special *u16-reader* *u32-reader* *vector*))
