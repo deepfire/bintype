@@ -392,7 +392,7 @@
 									     (fill-value (nth-value 1 (funcall ,(emit-toplevel-pavement package nil result-toplevel
 																	:force-specified-toplevel t)
 													       (offset ,obj)))))
-									   :declarations `((special ,self-sym ,direct-sym))))))))
+									   :declarations (emit-declarations :special `(,self-sym ,direct-sym))))))))
 
 #| Fact: during fill-value, only leaves need offset, which is of little wonder. |#
 (defgeneric fill-value (btobject)
