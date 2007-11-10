@@ -17,11 +17,13 @@
    (sub-id :accessor sub-id :initarg :sub-id)
    (width :accessor width :initarg :width)
    (initial-to-final-fn :accessor initial-to-final-fn :initarg :initial-to-final-fn)
-   (initial-value :accessor initial-value :initarg :initial-value)
+   (initial-value :accessor initial-value :initarg :initial-value :initform nil)
    (final-value :accessor final-value :initarg :final-value)))
 
 (defclass btcontainer (btobj)
-  ((childs :accessor btcontainer-childs :initarg :childs)))
+  ((paved-p :accessor paved-p :initform nil)
+   (paving-p :accessor paving-p :initform nil)
+   (childs :accessor childs :initarg :childs)))
 
 (defclass btordered (btcontainer)
   ((dimension :accessor btordered-dimension :initarg :dimension)
@@ -85,28 +87,23 @@
   (declare (ignore rest))
   (when (and (slot-boundp obj 'parent) (parent obj))
     (setf (cref (parent obj) (sub-id obj)) obj))
-  (typecase obj
-    (btstructured (pave (setf (initial-value obj) (funcall (bintype-instantiator (btstructured-bintype obj)))) obj))
-    (btordered    (pave nil obj)))
-  (when (and (slot-boundp obj 'toplevel) (apply-toplevel-op 'immediate-eval (toplevel obj)))
-    (fill-value obj)))
+  ;; We have to do it early, as PAVE dispatches upon this.
+  (when (typep obj 'btstructured)
+    (setf (initial-value obj) (funcall (bintype-instantiator (btstructured-bintype obj))))))
 
 (defgeneric cref (container sel)
   (:documentation "Reach for a child of a BTCONTAINER.")
   (:method ((btcontainer btordered) (sel integer))
-    (elt (btcontainer-childs btcontainer) sel))
+    (elt (childs btcontainer) sel))
   (:method ((btcontainer btstructured) (sel symbol))
-    (let ((val (gethash sel (btcontainer-childs btcontainer))))
-      (unless val
-	(error "BTSTRUCTURED ~S has no field called ~S." btcontainer sel))
-      val)))
+    (or (gethash sel (childs btcontainer)) (error "BTSTRUCTURED ~S has no field called ~S." btcontainer sel))))
 
 (defgeneric (setf cref) (val container sel)
   (:documentation "Set a child of a BTCONTAINER.")
   (:method (val (btcontainer btordered) (sel integer))
-    (setf (elt (btcontainer-childs btcontainer) sel) val))
+    (setf (elt (childs btcontainer) sel) val))
   (:method (val (btcontainer btstructured) (sel symbol))
-    (setf (gethash sel (btcontainer-childs btcontainer)) val)))
+    (setf (gethash sel (childs btcontainer)) val)))
 
 (defun generic-u8-reader (obj)
   (declare (special *vector*))
@@ -218,7 +215,7 @@
 		      (error "sequence stride must be specified for non-constant-width element types."))))
       (list 'btregular
 	    :element-type element-type :dimension dimension :stride stride
-	    :childs (make-array dimension)
+	    :childs (make-array dimension :initial-element nil)
 	    :width (* stride dimension))))
   (defun cl-type (element-type format)
     (ecase format
@@ -234,7 +231,7 @@
       (error "unknown sequence element type ~S." element-type))
     (list 'btirregular
 	  :element-type element-type :dimension dimension :stride-fn stride-fn
-	  :childs (make-array dimension)
+	  :childs (make-array dimension :initial-element nil)
 	  :width (iter (for i below dimension)
 		       (summing (funcall stride-fn i)))))
   (defun cl-type (element-type format)
@@ -266,10 +263,7 @@
 
 (defun bintype (name)
   (declare (type symbol name))
-  (let ((ret (gethash name *bintypes*)))
-    (unless ret
-      (error "Unable to find the requested bintype ~S." name))
-    ret))
+  (or (gethash name *bintypes*) (error "Unable to find the requested bintype ~S." name)))
 
 (defun bintype-toplevel (bintype name)
   (find name (bintype-toplevels bintype) :key (curry #'apply-toplevel-op 'name)))
@@ -280,18 +274,32 @@
 		  (bintype-toplevels (bintype type-name)))))
 
 (defgeneric pave (something obj)
+  (:method (something (obj btleaf)) t)
+  (:method :around (something (obj btcontainer))
+    (unless (or (paved-p obj) (paving-p obj))
+      (setf (paving-p obj) t)
+      (call-next-method)
+      (setf (paving-p obj) nil
+            (paved-p obj) t)))
+  (:method (something (obj btordered))
+    (when (and (plusp (btordered-dimension obj)) (subtypep (type-of (cref obj 0)) 'btcontainer))
+      (iter (for i below (btordered-dimension obj)) (for subobj = (cref obj i))
+            (pave (initial-value subobj) subobj))))
   (:method (something (obj btregular))
     (declare (ignore something))
     (let ((initargs (apply-typespec 'initargs (btordered-element-type obj))))
       (iter (for i below (btordered-dimension obj))
-	    (for offset from (offset obj) by (btregular-stride obj))
-	    (apply #'make-instance (first initargs) :offset offset :parent obj :sub-id i :initial-to-final-fn #'values (rest initargs)))))
+            (for offset from (offset obj) by (btregular-stride obj))
+            (apply #'make-instance (first initargs) :offset offset :parent obj :sub-id i :initial-to-final-fn #'values (rest initargs))))
+      
+    (call-next-method))
   (:method (something (obj btirregular))
     (declare (ignore something))
     (let ((initargs (apply-typespec 'initargs (btordered-element-type obj))))
       (iter (for i below (btordered-dimension obj))
 	    (for offset initially (offset obj) then (+ offset (funcall (btirregular-stride-fn obj) i)))
-	    (apply #'make-instance (first initargs) :offset offset :parent obj :sub-id i :initial-to-final-fn #'values (rest initargs))))))
+	    (apply #'make-instance (first initargs) :offset offset :parent obj :sub-id i :initial-to-final-fn #'values (rest initargs))))
+    (call-next-method)))
 
 (define-evaluation-domain toplevel-op)
 
@@ -311,6 +319,9 @@
 										     `(load-time-value (bintype-toplevel (bintype ',bintype-name) ',name)))
 								      :initial-to-final-fn ,(apply-toplevel-op 'initial-to-final-xform toplevel)
 								      (rest ,initargs))))
+             (pave (initial-value field-obj) field-obj)
+             (when (and (slot-boundp field-obj 'toplevel) (apply-toplevel-op 'immediate-eval (toplevel field-obj)))
+               (fill-value field-obj))
 	     (values (+ ,start-offset (if ,o-o-s-offset 0 (width field-obj)))
 		     field-obj)))))))
   
@@ -397,7 +408,7 @@
     (call-next-method))
   (:method ((obj btordered))
     (setf (initial-value obj) (map (apply-typespec 'cl-type (apply-toplevel-op 'typespec (toplevel obj)))
-				   #'fill-value (btcontainer-childs obj)))
+				   #'fill-value (childs obj)))
     (call-next-method))
   (:method ((obj btstructured))
     (let ((bintype (btstructured-bintype obj)))
@@ -409,6 +420,8 @@
     
 (defun sub (obj selector)
   (declare (type btcontainer obj))
+  (unless (paved-p obj)
+    (pave (initial-value obj) obj))
   (cref obj selector))
 
 (defun value (obj)
@@ -429,17 +442,30 @@
       (error "no parent of type ~S for ~S" type-name base))
     (iterate (parent base))))
 
+;; (defun path-value (current &rest designators)
+;;   (labels ((iterate (current designators)
+;; 		    (cond ((null designators)
+;; 			   (value current))
+;; 			  ((eq (first designators) :parent)
+;; 			   (iterate (parent current) (rest designators)))
+;; 			  ((and (consp (first designators)) (eq (caar designators) :typed-parent))
+;; 			   (iterate (find-parent-by-type current (cadar designators)) (rest designators)))
+;; 			  (t
+;; 			   (iterate (sub current (first designators)) (rest designators))))))
+;;     (iterate current designators)))
+
+(defun iterator (current designators)
+  (cond ((null designators)
+         (value current))
+        ((eq (first designators) :parent)
+         (iterator (parent current) (rest designators)))
+        ((and (consp (first designators)) (eq (caar designators) :typed-parent))
+         (iterator (find-parent-by-type current (cadar designators)) (rest designators)))
+        (t
+         (iterator (sub current (first designators)) (rest designators)))))
+
 (defun path-value (current &rest designators)
-  (labels ((iterate (current designators)
-		    (cond ((null designators)
-			   (value current))
-			  ((eq (first designators) :parent)
-			   (iterate (parent current) (rest designators)))
-			  ((and (consp (first designators)) (eq (caar designators) :typed-parent))
-			   (iterate (find-parent-by-type current (cadar designators)) (rest designators)))
-			  (t
-			   (iterate (sub current (first designators)) (rest designators))))))
-    (iterate current designators)))
+  (iterator current designators))
 
 (defun parse (bintype *vector* &optional (endianness :little-endian) (offset 0) &aux *u16-reader* *u32-reader*)
   (declare (special *u16-reader* *u32-reader* *vector*))
@@ -450,7 +476,9 @@
 				       (:big-endian (values #'u8-seq-word16be #'u8-seq-word32be)))))))
     (declare (special *endianness-setter*))
     (funcall *endianness-setter* endianness)
-    (fill-value (make-instance 'btstructured :bintype bintype :initial-value (funcall (bintype-instantiator bintype)) :offset offset))))
+    (let ((btobj (make-instance 'btstructured :bintype bintype :offset offset)))
+      (pave (initial-value btobj) btobj)
+      (fill-value btobj))))
 
 (defmacro defbintype (type-name &body f)
   (flet ((output-defstruct-field (toplevel)
