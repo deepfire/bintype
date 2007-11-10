@@ -59,33 +59,27 @@
 ;;           | D  -  an already-paved sub-object containing partial information about E
 ;;            \
 ;;             E  -  this object is un-paveable, unless ...
+(defun slot-value-for-print (o slot)
+  (when (slot-boundp o slot) (slot-value o slot)))
 
 (defmethod print-object ((o btregular) s)
-  (format s "#<BTREGULAR {~X} ~S offset: ~X dimension: ~D stride: ~D element-type: ~S>"
-	  (sb-vm::get-lisp-obj-address o)
-	  (when (slot-boundp o 'sub-id) (sub-id o))
-	  (when (slot-boundp o 'offset) (offset o))
+  (format s "#<BTREGULAR sub-id: ~S offset: ~X dimension: ~D stride: ~D element-type: ~S>"
+	  (slot-value-for-print o 'sub-id) (slot-value-for-print o 'offset)
 	  (btordered-dimension o) (btregular-stride o) (btordered-element-type o)))
 
 (defmethod print-object ((o btirregular) s)
-  (format s "#<BTIRREGULAR {~X} ~S offset: ~X dimension: ~D element-type: ~S>"
-	  (sb-vm::get-lisp-obj-address o)
-	  (when (slot-boundp o 'sub-id) (sub-id o))
-	  (when (slot-boundp o 'offset) (offset o))
+  (format s "#<BTIRREGULAR sub-id: ~S offset: ~X dimension: ~D element-type: ~S>"
+	  (slot-value-for-print o 'sub-id) (slot-value-for-print o 'offset)
 	  (btordered-dimension o) (btordered-element-type o)))
 
 (defmethod print-object ((o btstructured) s)
-  (format s "#<BTSTRUCTURED {~X} ~S offset: ~X bintype: ~S>"
-	  (sb-vm::get-lisp-obj-address o)
-	  (when (slot-boundp o 'sub-id) (sub-id o))
-	  (when (slot-boundp o 'offset) (offset o))
+  (format s "#<BTSTRUCTURED sub-id: ~S offset: ~X bintype: ~S>"
+	  (slot-value-for-print o 'sub-id) (slot-value-for-print o 'offset)
 	  (bintype-name (btstructured-bintype o))))
 
 (defmethod print-object ((o btleaf) s)
-  (format s "#<BTLEAF {~X} ~S offset: ~X>"
-	  (sb-vm::get-lisp-obj-address o)
-	  (when (slot-boundp o 'sub-id) (sub-id o))
-	  (when (slot-boundp o 'offset) (offset o))))
+  (format s "#<BTLEAF sub-id: ~S offset: ~X>"
+	  (slot-value-for-print o 'sub-id) (slot-value-for-print o 'offset)))
 
 (defmethod initialize-instance :after ((obj btobj) &rest rest)
   (declare (ignore rest))
