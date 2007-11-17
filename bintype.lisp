@@ -196,11 +196,15 @@
     '(nil &rest nil)))
 
 (define-primitive-type sequence (dimension &key element-type stride stride-fn (format :list))
-  (defun constant-width () nil)
+  (defun constant-width (dimension element-type stride stride-fn)
+    (when-let ((constant-stride (and (null stride-fn) (or stride (apply-typespec 'constant-width element-type)))))
+      (* constant-stride dimension)))
   (defun initargs (dimension element-type stride stride-fn)
     (unless (primitive-type-p element-type)
       (error "unknown sequence element type ~S." element-type))
     (let ((stride-fn (or stride-fn (when stride (constantly stride))
+                         (when-let ((stride (apply-typespec 'constant-width element-type)))
+                           (constantly stride))
                          (error "stride is specified by neither stride, nor stride-fn."))))
       (list 'btfuncstride
             :element-type element-type :dimension dimension
