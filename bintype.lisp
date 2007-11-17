@@ -3,7 +3,7 @@
   (:export
    #:bintype #:define-primitive-type #:defbintype #:parse #:export-bintype-accessors
    #:match #:plain #:indirect
-   #:pure #:current-offset #:zero-terminated-string #:zero-terminated-symbol #:irregular-sequence
+   #:pure #:current-offset #:zero-terminated-string #:zero-terminated-symbol #:funcstride-sequence
    #:set-endianness #:offset #:parent #:sub #:value #:path-value))
 
 (in-package :bintype)
@@ -29,11 +29,8 @@
   ((dimension :accessor btordered-dimension :initarg :dimension)
    (element-type :accessor btordered-element-type :initarg :element-type)))
 
-(defclass btregular (btordered)
-  ((stride :accessor btregular-stride :initarg :stride)))
-
-(defclass btirregular (btordered)
-  ((stride-fn :accessor btirregular-stride-fn :initarg :stride-fn)))
+(defclass btfuncstride (btordered)
+  ((stride-fn :accessor btfuncstride-stride-fn :initarg :stride-fn)))
 
 (defclass btstructured (btcontainer)
   ((bintype :accessor btstructured-bintype :initarg :bintype))
@@ -64,13 +61,8 @@
 (defun slot-value-for-print (o slot)
   (when (slot-boundp o slot) (slot-value o slot)))
 
-(defmethod print-object ((o btregular) s)
-  (format s "#<BTREGULAR sub-id: ~S offset: ~X dimension: ~D stride: ~D element-type: ~S>"
-	  (slot-value-for-print o 'sub-id) (slot-value-for-print o 'offset)
-	  (btordered-dimension o) (btregular-stride o) (btordered-element-type o)))
-
-(defmethod print-object ((o btirregular) s)
-  (format s "#<BTIRREGULAR sub-id: ~S offset: ~X dimension: ~D element-type: ~S>"
+(defmethod print-object ((o btfuncstride) s)
+  (format s "#<BTFUNCSTRIDE sub-id: ~S offset: ~X dimension: ~D element-type: ~S>"
 	  (slot-value-for-print o 'sub-id) (slot-value-for-print o 'offset)
 	  (btordered-dimension o) (btordered-element-type o)))
 
@@ -203,43 +195,25 @@
   (defun quotation ()
     '(nil &rest nil)))
 
-(define-primitive-type sequence (dimension &key element-type stride (format :list))
-  (defun constant-width (dimension element-type stride)
-    (let ((stride (or stride (apply-typespec 'constant-width element-type)
-		      (error "sequence stride must be specified for non-constant-width element types."))))
-      (* stride dimension)))
-  (defun initargs (dimension element-type stride)
-    (unless (primitive-type-p element-type)
-      (error "unknown sequence element type ~S." element-type))
-    (let ((stride (or stride (apply-typespec 'constant-width element-type)
-		      (error "sequence stride must be specified for non-constant-width element types."))))
-      (list 'btregular
-	    :element-type element-type :dimension dimension :stride stride
-	    :childs (make-array dimension :initial-element nil)
-	    :width (* stride dimension))))
-  (defun cl-type (element-type format)
-    (ecase format
-      (:list 'list)
-      (:vector `(vector ,(apply-typespec 'cl-type element-type)))))
-  (defun quotation ()
-    '(nil &key (element-type t) stride format)))
-
-(define-primitive-type irregular-sequence (dimension &key element-type stride-fn (format :list))
+(define-primitive-type sequence (dimension &key element-type stride stride-fn (format :list))
   (defun constant-width () nil)
-  (defun initargs (dimension element-type stride-fn)
+  (defun initargs (dimension element-type stride stride-fn)
     (unless (primitive-type-p element-type)
       (error "unknown sequence element type ~S." element-type))
-    (list 'btirregular
-	  :element-type element-type :dimension dimension :stride-fn stride-fn
-	  :childs (make-array dimension :initial-element nil)
-	  :width (iter (for i below dimension)
-		       (summing (funcall stride-fn i)))))
+    (let ((stride-fn (or stride-fn (when stride (constantly stride))
+                         (error "stride is specified by neither stride, nor stride-fn."))))
+      (list 'btfuncstride
+            :element-type element-type :dimension dimension
+            :stride-fn stride-fn
+            :childs (make-array dimension :initial-element nil)
+            :width (iter (for i below dimension)
+                         (summing (funcall stride-fn i))))))
   (defun cl-type (element-type format)
     (ecase format
       (:list 'list)
       (:vector `(vector ,(apply-typespec 'cl-type element-type)))))
   (defun quotation ()
-    '(nil &key (element-type t) stride-fn format)))
+    '(nil &key (element-type t) stride stride-fn format)))
 
 (define-primitive-type typecase (dispatch-value &rest types)
   (defun constant-width () nil)
@@ -285,19 +259,11 @@
     (when (and (plusp (btordered-dimension obj)) (subtypep (type-of (cref obj 0)) 'btcontainer))
       (iter (for i below (btordered-dimension obj)) (for subobj = (cref obj i))
             (pave (initial-value subobj) subobj))))
-  (:method (something (obj btregular))
+  (:method (something (obj btfuncstride))
     (declare (ignore something))
     (let ((initargs (apply-typespec 'initargs (btordered-element-type obj))))
       (iter (for i below (btordered-dimension obj))
-            (for offset from (offset obj) by (btregular-stride obj))
-            (apply #'make-instance (first initargs) :offset offset :parent obj :sub-id i :initial-to-final-fn #'values (rest initargs))))
-      
-    (call-next-method))
-  (:method (something (obj btirregular))
-    (declare (ignore something))
-    (let ((initargs (apply-typespec 'initargs (btordered-element-type obj))))
-      (iter (for i below (btordered-dimension obj))
-	    (for offset initially (offset obj) then (+ offset (funcall (btirregular-stride-fn obj) i)))
+	    (for offset initially (offset obj) then (+ offset (funcall (btfuncstride-stride-fn obj) i)))
 	    (apply #'make-instance (first initargs) :offset offset :parent obj :sub-id i :initial-to-final-fn #'values (rest initargs))))
     (call-next-method)))
 
