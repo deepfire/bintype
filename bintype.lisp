@@ -212,7 +212,7 @@
     (let ((stride-fn (or stride-fn (when stride (constantly stride))
                          (when-let ((stride (apply-typespec 'constant-width element-type)))
                            (constantly stride))
-                         (error "stride is specified by neither stride, nor stride-fn, nor it is deducible from element type."))))
+                         (error "stride is neither specified directly, nor via stride-fn, nor it is deducible from element type."))))
       (list 'btfuncstride
             :element-type element-type :dimension dimension
             :stride-fn stride-fn
