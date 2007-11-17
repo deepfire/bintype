@@ -133,6 +133,7 @@
 (define-evaluation-domain typespec)
 
 (define-primitive-type unsigned-byte (width)
+  (defun eval-parametrisation)
   (defun constant-width (width) (/ width 8))
   (defun initargs (width)
     (list 'btleaf
@@ -147,6 +148,7 @@
     '(nil)))
 
 (define-primitive-type pure (typespec expression)
+  (defun eval-parametrisation () t)
   (defun constant-width () 0)
   (defmacro initargs (expression)
     `(list 'btleaf :value-fn (constantly ,expression) ;; (lambda (obj) (let ((*sub-id* (sub-id obj))) (declare (special *sub-id*)) ,expression))
@@ -157,6 +159,7 @@
     '(t nil)))
   
 (define-primitive-type current-offset (width)
+  (defun eval-parametrisation)
   (defun constant-width () 0)
   (defun initargs ()
     (list 'btleaf :value-fn (lambda (obj) (offset obj)) :width 0))
@@ -172,6 +175,7 @@
 	    'string)))
   
 (define-primitive-type zero-terminated-string (dimension)
+  (defun eval-parametrisation () t)
   (defun constant-width (dimension) dimension)
   (defun initargs (dimension)
     (list 'btleaf :value-fn (lambda (obj)
@@ -184,6 +188,7 @@
     '(nil)))
 
 (define-primitive-type zero-terminated-symbol (dimension &optional (package :keyword))
+  (defun eval-parametrisation () t)
   (defun constant-width (dimension) dimension)
   (defun initargs (dimension package)
     (list 'btleaf :value-fn (lambda (obj)
@@ -196,8 +201,10 @@
     '(nil &rest nil)))
 
 (define-primitive-type sequence (dimension &key element-type stride stride-fn (format :list))
+  (defun eval-parametrisation () t)
   (defun constant-width (dimension element-type stride stride-fn)
-    (when-let ((constant-stride (and (null stride-fn) (or stride (apply-typespec 'constant-width element-type)))))
+    (when-let ((constant-stride (and (null stride-fn) (not (apply-typespec 'eval-parametrisation element-type))
+                                     (or stride (apply-typespec 'constant-width element-type)))))
       (* constant-stride dimension)))
   (defun initargs (dimension element-type stride stride-fn)
     (unless (primitive-type-p element-type)
@@ -205,7 +212,7 @@
     (let ((stride-fn (or stride-fn (when stride (constantly stride))
                          (when-let ((stride (apply-typespec 'constant-width element-type)))
                            (constantly stride))
-                         (error "stride is specified by neither stride, nor stride-fn."))))
+                         (error "stride is specified by neither stride, nor stride-fn, nor it is deducible from element type."))))
       (list 'btfuncstride
             :element-type element-type :dimension dimension
             :stride-fn stride-fn
@@ -220,6 +227,7 @@
     '(nil &key (element-type t) stride stride-fn format)))
 
 (define-primitive-type typecase (dispatch-value &rest types)
+  (defun eval-parametrisation () t)
   (defun constant-width () nil)
   (defun cl-type (types)
     `(or ,@(mapcar (compose (curry #'apply-typespec 'cl-type) #'cadr) types)))
