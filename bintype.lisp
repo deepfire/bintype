@@ -347,7 +347,7 @@
 (define-function-evaluations toplevel-op match (name typespec values &key ignore out-of-stream-offset)
   (name (name)					name)
   (typespec (typespec)				typespec)
-  (cl-type-for-field ()				'(or null keyword))
+  (cl-type-for-field ()				t) ;; try to calculate the most specific common type of values
   (emits-field-p (ignore)			(null ignore))
   (out-of-stream-offset (out-of-stream-offset)	out-of-stream-offset)
   (quotation ()					'(t t t &rest nil))
