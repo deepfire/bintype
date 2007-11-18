@@ -133,11 +133,11 @@
 
 (define-evaluation-domain typespec)
 
-(defun typespec-apply-meaningful-p (typespec)
+(defun typespec-types-match-p (typeset typespec)
   (op-parameter-destructurer (op params) typespec
     (format t "analysing ~S ~S, with s-p-t ~S -> ~S~%" op params (apply-typespec 'apply-safe-parameter-types typespec)
             (lambda-list-application-types-match-p (apply-typespec 'apply-safe-parameter-types typespec) params))
-    (lambda-list-application-types-match-p (apply-typespec 'apply-safe-parameter-types typespec) params)))
+    (lambda-list-application-types-match-p (apply-typespec typeset typespec) params)))
 
 (define-primitive-type unsigned-byte (width)
   (defun apply-safe-parameter-types () '((integer 0)))
@@ -212,7 +212,7 @@
   (defun constant-width (dimension element-type stride stride-fn)
     (when-let ((constant-stride (and (null stride-fn)
                                      (or stride
-                                         (and (typespec-apply-meaningful-p element-type)
+                                         (and (typespec-types-match-p 'apply-safe-parameter-types element-type)
                                               (apply-typespec 'constant-width element-type))))))
       (* constant-stride dimension)))
   (defun initargs (dimension element-type stride stride-fn)
@@ -296,18 +296,24 @@
 
 (define-evaluation-domain toplevel-op)
 
+(defun toplevel-types-match-p (typeset toplevel)
+  (op-parameter-destructurer (op params) toplevel
+    (declare (ignore op))
+    (lambda-list-application-types-match-p (apply-toplevel-op typeset toplevel) params)))
+
 ;; circularity: emit-toplevel-pavement -> toplevel-op indirect -> e-t-p.
 (defun emit-toplevel-pavement (bintype-name toplevel &key force-specified-toplevel)
   (let ((name (apply-toplevel-op 'name toplevel))
+        (no-oos (toplevel-types-match-p 'no-oos toplevel))
 	(typespec (apply-toplevel-op 'typespec toplevel)))
     (let ((quoted-toplevel (map-lambda-list #'quote-when (cons nil (apply-toplevel-op 'quotation toplevel)) toplevel))
 	  (quoted-typespec (map-lambda-list #'quote-when (cons nil (apply-typespec 'quotation typespec)) (mklist typespec))))
       (with-gensyms (start-offset o-o-s-offset initargs)
         (with-named-lambda-emission (format-symbol nil "~S-~S-PAVEMENT" bintype-name name) (list start-offset)
           `(declare (special *self*))
-          `(let* ((,o-o-s-offset (eval-toplevel-op out-of-stream-offset ,quoted-toplevel))
+          `(let* (,@(unless no-oos `((,o-o-s-offset (eval-toplevel-op out-of-stream-offset ,quoted-toplevel))))
                   (,initargs (eval-typespec initargs ,quoted-typespec))
-                  (field-obj (apply #'make-instance (first ,initargs) :offset (or ,o-o-s-offset ,start-offset) :parent *self* :sub-id ',name
+                  (field-obj (apply #'make-instance (first ,initargs) :offset ,(if no-oos start-offset `(or ,o-o-s-offset ,start-offset)) :parent *self* :sub-id ',name
                                                                       :toplevel ,(if force-specified-toplevel
                                                                                      `',toplevel
                                                                                      `(load-time-value (bintype-toplevel (bintype ',bintype-name) ',name)))
@@ -316,7 +322,7 @@
              (pave field-obj)
              ,@(when (apply-toplevel-op 'immediate-eval toplevel)
                      `((fill-value field-obj)))
-             (values (+ ,start-offset (if ,o-o-s-offset 0 (width field-obj)))
+             (values (+ ,start-offset ,(if no-oos `(width field-obj) `(if ,o-o-s-offset 0 (width field-obj))))
                      field-obj)))))))
 
 (defun set-endianness (val)
@@ -342,6 +348,7 @@
   (emits-field-p (ignore)			(null ignore))
   (out-of-stream-offset (out-of-stream-offset)	out-of-stream-offset)
   (quotation ()					'(t t &rest nil))
+  (no-oos ()					'(t t &key (ignore t) (out-of-stream-offset null)))
   (immediate-eval ()				nil)
   (initial-to-final-xform ()			'#'values))
 
@@ -365,6 +372,7 @@
   (emits-field-p (ignore)			(null ignore))
   (out-of-stream-offset (out-of-stream-offset)	out-of-stream-offset)
   (quotation ()					'(t t t &rest nil))
+  (no-oos ()					'(t t t &key (ignore t) (out-of-stream-offset null)))
   (immediate-eval (values)			t)
   (initial-to-final-xform (values) 		(emit-lambda '(val obj) (list (emit-match-cond/case 'val values))
 							     :declarations (emit-declarations :ignore '(obj)))))
@@ -379,6 +387,7 @@
   (emits-field-p (ignore)			(null ignore))
   (out-of-stream-offset (out-of-stream-offset)	out-of-stream-offset)
   (quotation ()					'(t t &rest nil))
+  (no-oos ()					'(t t &key (ignore t) (out-of-stream-offset null) (final-value t)))
   (immediate-eval (result-toplevel)		(apply-toplevel-op 'immediate-eval result-toplevel))
   (initial-to-final-xform (result-toplevel)	`(compose ,(apply-toplevel-op 'initial-to-final-xform result-toplevel)
                                                           ,(emit-lambda `(*direct-value* obj &aux (*self* (parent obj)))
