@@ -4,7 +4,8 @@
    #:bintype #:define-primitive-type #:defbintype #:parse #:export-bintype-accessors
    #:match #:plain #:indirect
    #:pure #:current-offset #:zero-terminated-string #:zero-terminated-symbol #:funcstride-sequence
-   #:set-endianness #:offset #:parent #:sub #:value #:path-value))
+   #:set-endianness #:offset #:parent #:sub #:value #:path-value
+   #:*self* #:*direct-value* #:*total-length*))
 
 (in-package :bintype)
 
@@ -252,6 +253,7 @@
   (name nil :type symbol)
   (documentation nil :type (or null string))
   instantiator
+  paver
   (field-setters (make-hash-table))
   toplevels)
 
@@ -268,20 +270,24 @@
       (reduce #'(lambda (x y) (when (and x y) (+ x y)))
               (mapcar (curry #'apply-typespec 'constant-width) typespecs)))))
 
-(defgeneric pave (something obj)
-  (:method (something (obj btleaf)) t)
-  (:method :around (something (obj btcontainer))
+(defgeneric pave (obj)
+  (:method ((obj btleaf)) t)
+  (:method :around ((obj btcontainer))
     (unless (or (paved-p obj) (paving-p obj))
       (setf (paving-p obj) t)
       (call-next-method)
       (setf (paving-p obj) nil
             (paved-p obj) t)))
-  (:method (something (obj btordered))
+  (:method ((obj btstructured))
+    (let ((*self* obj) *total-length*)
+      (declare (special *self* *total-length* *vector*))
+      (setf (width obj)
+            (- (funcall (funcall (bintype-paver (btstructured-bintype obj))) (offset obj)) (offset obj)))))
+  (:method ((obj btordered))
     (when (and (plusp (btordered-dimension obj)) (subtypep (type-of (cref obj 0)) 'btcontainer))
       (iter (for i below (btordered-dimension obj)) (for subobj = (cref obj i))
-            (pave (initial-value subobj) subobj))))
-  (:method (something (obj btfuncstride))
-    (declare (ignore something))
+            (pave subobj))))
+  (:method ((obj btfuncstride))
     (let ((initargs (apply-typespec 'initargs (btordered-element-type obj))))
       (iter (for i below (btordered-dimension obj))
 	    (for offset initially (offset obj) then (+ offset (funcall (btfuncstride-stride-fn obj) i)))
@@ -291,46 +297,42 @@
 (define-evaluation-domain toplevel-op)
 
 ;; circularity: emit-toplevel-pavement -> toplevel-op indirect -> e-t-p.
-(defun emit-toplevel-pavement (package bintype-name toplevel &key force-specified-toplevel &aux (self-sym (intern "*SELF*" package)))
+(defun emit-toplevel-pavement (package bintype-name toplevel &key force-specified-toplevel)
   (let ((name (apply-toplevel-op 'name toplevel))
 	(typespec (apply-toplevel-op 'typespec toplevel)))
-    (let ((quoted-toplevel (lambda-xform #'quote-when (cons nil (apply-toplevel-op 'quotation toplevel)) toplevel))
-	  (quoted-typespec (lambda-xform #'quote-when (cons nil (apply-typespec 'quotation typespec)) (mklist typespec)))
-          (lambda-name (format-symbol package "~S-~S-PAVEMENT" bintype-name name)))
+    (let ((quoted-toplevel (map-lambda-list #'quote-when (cons nil (apply-toplevel-op 'quotation toplevel)) toplevel))
+	  (quoted-typespec (map-lambda-list #'quote-when (cons nil (apply-typespec 'quotation typespec)) (mklist typespec))))
       (with-gensyms (start-offset o-o-s-offset initargs)
-	`(flet ((,lambda-name (,start-offset)
-                    (let* ((,o-o-s-offset (eval-toplevel-op out-of-stream-offset ,quoted-toplevel))
-                           (,initargs (eval-typespec initargs ,quoted-typespec))
-                           (field-obj (apply #'make-instance (first ,initargs) :offset (or ,o-o-s-offset ,start-offset) :parent ,self-sym :sub-id ',name
-								               :toplevel ,(if force-specified-toplevel
-                                                                                              `',toplevel
-                                                                                              `(load-time-value (bintype-toplevel (bintype ',bintype-name) ',name)))
-                                                                               :initial-to-final-fn ,(apply-toplevel-op 'initial-to-final-xform toplevel)
-                                                                               (rest ,initargs))))
-                      (pave (initial-value field-obj) field-obj)
-                      (when (and (slot-boundp field-obj 'toplevel) (apply-toplevel-op 'immediate-eval (toplevel field-obj)))
-                        (fill-value field-obj))
-                      (values (+ ,start-offset (if ,o-o-s-offset 0 (width field-obj)))
-                              field-obj))))
-           #',lambda-name)))))
+        (with-named-lambda-emission (format-symbol package "~S-~S-PAVEMENT" bintype-name name) (list start-offset)
+          `(declare (special *self*))
+          `(let* ((,o-o-s-offset (eval-toplevel-op out-of-stream-offset ,quoted-toplevel))
+                  (,initargs (eval-typespec initargs ,quoted-typespec))
+                  (field-obj (apply #'make-instance (first ,initargs) :offset (or ,o-o-s-offset ,start-offset) :parent *self* :sub-id ',name
+                                                                      :toplevel ,(if force-specified-toplevel
+                                                                                     `',toplevel
+                                                                                     `(load-time-value (bintype-toplevel (bintype ',bintype-name) ',name)))
+                                                                      :initial-to-final-fn ,(apply-toplevel-op 'initial-to-final-xform toplevel)
+                                                                      (rest ,initargs))))
+             (pave field-obj)
+             (when (and (slot-boundp field-obj 'toplevel) (apply-toplevel-op 'immediate-eval (toplevel field-obj)))
+               (fill-value field-obj))
+             (values (+ ,start-offset (if ,o-o-s-offset 0 (width field-obj)))
+                     field-obj)))))))
   
-(defun output-pave-method (name toplevels total-length &aux (package (symbol-package name))
-			   (self-sym (intern "*SELF*" package)) (total-len-sym (intern "*TOTAL-LENGTH*" package)))
-  `(defmethod pave ((instance ,name) (obj btstructured) &aux (,self-sym obj) ,@(when total-length `(,total-len-sym)))
-     (declare (special ,self-sym ,@(when total-length `(,total-len-sym)) *endianness-setter* *vector*))
-     (flet ((set-endianness (val)
-	      (declare (type (member :little-endian :big-endian)))
-	      (funcall *endianness-setter* val)))
+(defun output-paver-lambda (name toplevels total-length &aux (package (symbol-package name)))
+  (with-named-lambda-emission (format-symbol package "PAVE-~S" name) ()
+    `(declare (special *endianness-setter* *total-length* *vector*))
+    `(flet ((set-endianness (val)
+              (declare (type (member :little-endian :big-endian) val))
+              (funcall *endianness-setter* val)))
        (declare (ignorable #'set-endianness))
        ,@(case total-length
-               (:length `((setf ,total-len-sym (length *vector*))))
+               (:length `((setf *total-length* (length *vector*))))
                (:array-dimension `((unless (subtypep (type-of *vector*) 'vector) (error "this bintype requires the sequence to be a vector."))
-                                   (setf ,total-len-sym (array-dimension *vector* 0))))
+                                   (setf *total-length* (array-dimension *vector* 0))))
                ((nil))
                (t (error "total-length must be of type (member :array-dimension), was ~S." total-length)))
-       (setf (width obj)
-             (- (funcall (compose ,@(mapcar (curry #'emit-toplevel-pavement package name) (reverse toplevels))) (offset obj))
-                (offset obj))))))
+       (compose ,@(mapcar (curry #'emit-toplevel-pavement package name) (reverse toplevels))))))
 
 (define-function-evaluations toplevel-op value (name typespec &key ignore out-of-stream-offset)
   (name (name)					name)
@@ -377,16 +379,15 @@
   (out-of-stream-offset (out-of-stream-offset)	out-of-stream-offset)
   (quotation ()					'(t t &rest nil))
   (immediate-eval (result-toplevel)		(apply-toplevel-op 'immediate-eval result-toplevel))
-  (initial-to-final-xform (result-toplevel)	(let* ((package (symbol-package (apply-toplevel-op 'name result-toplevel)))
-						       (self-sym (intern "*SELF*" package)) (direct-sym (intern "*DIRECT-VALUE*" package)))
+  (initial-to-final-xform (result-toplevel)	(let* ((package (symbol-package (apply-toplevel-op 'name result-toplevel))))
 						  (with-gensyms (obj)
 						   `(compose ,(apply-toplevel-op 'initial-to-final-xform result-toplevel)
-							     ,(emit-lambda `(,direct-sym ,obj &aux (,self-sym (parent ,obj)))
-									   `( ;; (unless (boundp ',(intern "*SELF*" package)) (error "Totally mysterious!"))
+							     ,(emit-lambda `(*direct-value* ,obj &aux (*self* (parent ,obj)))
+									   `( ;; (unless (boundp '*self*) (error "Totally mysterious!"))
 									     (fill-value (nth-value 1 (funcall ,(emit-toplevel-pavement package nil result-toplevel
 																	:force-specified-toplevel t)
 													       (offset ,obj)))))
-									   :declarations (emit-declarations :special `(,self-sym ,direct-sym))))))))
+									   :declarations (emit-declarations :special `(*self* *direct-value*))))))))
 
 #| Fact: during fill-value, only leaves need offset, which is of little wonder. |#
 (defgeneric fill-value (btobject)
@@ -410,7 +411,7 @@
 (defun sub (obj selector)
   (declare (type btcontainer obj))
   (unless (paved-p obj)
-    (pave (initial-value obj) obj))
+    (pave obj))
   (cref obj selector))
 
 (defun value (obj)
@@ -466,7 +467,7 @@
     (declare (special *endianness-setter*))
     (funcall *endianness-setter* endianness)
     (let ((btobj (make-instance 'btstructured :bintype bintype :offset offset)))
-      (pave (initial-value btobj) btobj)
+      (pave btobj)
       (fill-value btobj))))
 
 (defmacro defbintype (type-name lambda-list &body f)
@@ -493,9 +494,8 @@
 	       (let* ((field-name (apply-toplevel-op 'name toplevel))
 		      (setter-name (format-symbol (symbol-package ',type-name) "~A-~A" ',type-name field-name)))
 		 (setf (gethash field-name (bintype-field-setters bintype)) (fdefinition `(setf ,setter-name))))))
-	   (setf (bintype-instantiator bintype)
-		 (fdefinition ',(format-symbol (symbol-package type-name) "MAKE-~A" type-name)))
-	   ,(output-pave-method type-name toplevels total-length))))))
+	   (setf (bintype-instantiator bintype) (fdefinition ',(format-symbol (symbol-package type-name) "MAKE-~A" type-name))
+                 (bintype-paver bintype) ,(output-paver-lambda type-name toplevels total-length)))))))
 
 (defun export-bintype-accessors (bintype)
   (let ((bintype-name (bintype-name bintype)))
