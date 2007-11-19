@@ -167,10 +167,9 @@
 (define-primitive-type pure (typespec expression)
   (defun apply-safe-parameter-types () '(t t))
   (defun constant-width () 0)
-  (defun type-paramstack (typespec) typespec)
-  (defmacro initargs (expression)
-    `(list 'btleaf :value-fn (constantly ,expression) ;; (lambda (obj) (let ((*sub-id* (sub-id obj))) (declare (special *sub-id*)) ,expression))
-	           :width 0))
+  (defun type-paramstack ())
+  (defun initargs (expression)
+    (list 'btleaf :value-fn (constantly expression) :width 0))
   (defun cl-type (typespec)
     (apply-typespec 'cl-type typespec))
   (defun quotation ()
@@ -271,6 +270,7 @@
 (defstruct bintype
   (name nil :type symbol)
   (documentation nil :type (or null string))
+  lambda-list
   instantiator
   paver
   (field-setters (make-hash-table))
@@ -285,7 +285,7 @@
 
 (defun btstructured-constant-width (type-name)
   (let ((typespecs (mapcar (curry #'apply-toplevel-op 'typespec) (bintype-toplevels (bintype type-name)))))
-    (when (every #'typespec-apply-meaningful-p typespecs)
+    (when (every (curry #'apply-typespec 'apply-safe-parameter-types) typespecs)
       (reduce #'(lambda (x y) (when (and x y) (+ x y)))
               (mapcar (curry #'apply-typespec 'constant-width) typespecs)))))
 
@@ -298,24 +298,23 @@
       (setf (paving-p obj) nil
             (paved-p obj) t)))
   (:method ((obj btstructured))
-    (let ((*self* obj) *total-length*)
+    (let ((*self* obj) *total-length* (bintype (btstructured-bintype obj)))
       (declare (special *self* *total-length* *sequence*))
       (setf (width obj)
-            (- (funcall (funcall (bintype-paver (btstructured-bintype obj))) (offset obj)) (offset obj)))))
+            (- (funcall (apply (bintype-paver bintype) (first (params obj))) (offset obj)) (offset obj)))))
   (:method ((obj btordered))
-;;     (map 'null #'pave (slot-value obj 'childs))
-    (when (and (plusp (btordered-dimension obj)) (subtypep (type-of (cref obj 0)) 'btcontainer))
-      (iter (for i below (btordered-dimension obj)) (for subobj = (cref obj i))
-            (pave subobj))))
+    (map 'null #'pave (slot-value obj 'childs)))
   (:method ((obj btfuncstride))
-    (let ((typespec (btordered-element-type obj)))
-      (op-parameter-destructurer (op params) typespec
-        (declare (ignore params))
-        (let ((initargs (apply-typespec 'initargs (cons op (second (params obj))))))
-          (iter (for i below (btordered-dimension obj))
-                (for offset initially (offset obj) then (+ offset (funcall (btfuncstride-stride-fn obj) i)))
-                (apply #'make-instance (first initargs) :typespec typespec :offset offset :parent obj :sub-id i :initial-to-final-fn #'values :params (rest (params obj))
-                       (rest initargs))))))
+    (flet ((pave-btfuncstride (obj dimension &key element-type stride stride-fn (format :list))
+             (declare (ignore stride stride-fn format))
+             (op-parameter-destructurer (op params) element-type
+               (declare (ignore params))
+               (let ((initargs (apply-typespec 'initargs (cons op (second (params obj))))))
+                 (iter (for i below dimension)
+                       (for offset initially (offset obj) then (+ offset (funcall (btfuncstride-stride-fn obj) i)))
+                       (apply #'make-instance (first initargs) :typespec element-type :offset offset :parent obj :sub-id i :initial-to-final-fn #'values :params (rest (params obj))
+                              (rest initargs)))))))
+      (apply #'pave-btfuncstride obj (first (params obj))))
     (call-next-method)))
 
 (define-evaluation-domain toplevel-op)
@@ -352,8 +351,8 @@
   (declare (type (member :little-endian :big-endian) val) (special *endianness-setter*))
   (funcall *endianness-setter* val))
 
-(defun output-paver-lambda (name toplevels total-length)
-  (with-named-lambda-emission (format-symbol nil "PAVE-~S" name) ()
+(defun output-paver-lambda (name lambda-list toplevels total-length)
+  (with-named-lambda-emission (format-symbol nil "PAVE-~S" name) lambda-list
     `(declare (special *total-length* *sequence*))
     (case total-length
       (:length `(setf *total-length* (length *sequence*)))
@@ -483,9 +482,9 @@
     (funcall *endianness-setter* endianness)
     (op-parameter-destructurer (op params) typespec
       (let* ((bintype (bintype op))
-             (btobj (make-instance 'btstructured :bintype bintype :offset offset :params params :typespec typespec)))
-        (pave btobj)
-        (fill-value btobj)))))
+             (obj (make-instance 'btstructured :bintype bintype :offset offset :params (list params) :typespec typespec)))
+        (pave obj)
+        (fill-value obj)))))
 
 (defmacro defbintype (type-name lambda-list &body f)
   (flet ((output-defstruct-field (toplevel)
@@ -496,7 +495,7 @@
 	   (producing-toplevels (remove-if-not (curry #'apply-toplevel-op 'emits-field-p) toplevels)))
       `(progn
 	 (setf (gethash ',type-name *bintypes*)
-	       (make-bintype :name ',type-name :documentation ,documentation :toplevels ',toplevels))
+	       (make-bintype :name ',type-name :documentation ,documentation :lambda-list ',lambda-list :toplevels ',toplevels))
 	 (defstruct ,type-name ,@(mapcar #'output-defstruct-field producing-toplevels))
 	 (define-primitive-type ,type-name ,lambda-list
            (defun apply-safe-parameter-types () '(&rest (integer 0)))
@@ -505,7 +504,7 @@
 	   (defun initargs ,(lambda-list-binds lambda-list) (declare (ignorable ,@(lambda-list-binds lambda-list)))
                   (list 'btstructured :bintype (bintype ',type-name)))
 	   (defun cl-type () ',type-name)
-	   (defun quotation ()))
+	   (defun quotation () '(&rest nil)))
 	 (let* ((bintype (bintype ',type-name)))
 	   (dolist (toplevel (bintype-toplevels bintype))
 	     (when (apply-toplevel-op 'emits-field-p toplevel)
@@ -513,7 +512,7 @@
 		      (setter-name (format-symbol (symbol-package ',type-name) "~A-~A" ',type-name field-name)))
 		 (setf (gethash field-name (bintype-field-setters bintype)) (fdefinition `(setf ,setter-name))))))
 	   (setf (bintype-instantiator bintype) #',(format-symbol (symbol-package type-name) "MAKE-~A" type-name)
-                 (bintype-paver bintype) ,(output-paver-lambda type-name toplevels total-length)))))))
+                 (bintype-paver bintype) ,(output-paver-lambda type-name lambda-list toplevels total-length)))))))
 
 (defun export-bintype-accessors (bintype)
   (let ((bintype-name (bintype-name bintype)))
