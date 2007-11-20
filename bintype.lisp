@@ -20,7 +20,9 @@
    (width :accessor width :initarg :width)
    (initial-to-final-fn :accessor initial-to-final-fn :initarg :initial-to-final-fn)
    (initial-value :accessor initial-value :initarg :initial-value :initform nil)
-   (final-value :accessor final-value :initarg :final-value)))
+   (final-value :accessor final-value :initarg :final-value))
+  (:default-initargs
+   :initial-to-final-fn #'values))
 
 (defclass btcontainer (btobj)
   ((paved-p :accessor paved-p :initform nil)
@@ -28,17 +30,19 @@
    (childs :accessor childs :initarg :childs)))
 
 (defclass btordered (btcontainer)
-  ((dimension :accessor btordered-dimension :initarg :dimension)
-   (element-type :accessor btordered-element-type :initarg :element-type)))
+  ((element-type :accessor btordered-element-type :initarg :element-type)))
 
 (defclass btfuncstride (btordered)
-  ((stride-fn :accessor btfuncstride-stride-fn :initarg :stride-fn)))
+  ((dimension :accessor btfuncstride-dimension :initarg :dimension)
+   (stride-fn :accessor btfuncstride-stride-fn :initarg :stride-fn)))
+
+(defclass btorderedpack (btordered)
+  ((length-guess :accessor btorderedpack-length-guess :initarg :length-guess)))
 
 (defclass btstructured (btcontainer)
   ((bintype :accessor btstructured-bintype :initarg :bintype))
   (:default-initargs
-   :childs (make-hash-table)
-   :initial-to-final-fn #'values))
+   :childs (make-hash-table)))
 
 (defclass btleaf (btobj)
   ((value-fn :accessor btleaf-value-fn :initarg :value-fn)))
@@ -66,7 +70,7 @@
 (defmethod print-object ((o btfuncstride) s)
   (format s "#<BTFUNCSTRIDE {~8,'0X} sub-id: ~S offset: ~X dimension: ~D element-type: ~S>"
 	  (sb-kernel:get-lisp-obj-address o) (slot-value-for-print o 'sub-id) (slot-value-for-print o 'offset)
-	  (btordered-dimension o) (btordered-element-type o)))
+	  (btfuncstride-dimension o) (btordered-element-type o)))
 
 (defmethod print-object ((o btstructured) s)
   (format s "#<BTSTRUCTURED sub-id: ~S offset: ~X bintype: ~S>"
@@ -82,21 +86,25 @@
   (when (slot-boundp obj 'parent)
     (setf (cref (parent obj) (sub-id obj)) obj)))
 
-(defmethod initialize-instance :after ((obj btordered) &rest rest)
+(defmethod initialize-instance :after ((obj btfuncstride) &rest rest)
   (declare (ignore rest))
   (setf (slot-value obj 'childs) (make-array (slot-value obj 'dimension) :initial-element nil)))
+
+(defmethod initialize-instance :after ((obj btorderedpack) &rest rest)
+  (declare (ignore rest))
+  (setf (slot-value obj 'childs) (make-array (slot-value obj 'length-guess) :initial-element nil :adjustable t :fill-pointer 0)))
 
 (defgeneric cref (container sel)
   (:documentation "Reach for a child of a BTCONTAINER.")
   (:method ((btcontainer btordered) (sel integer))
-    (elt (childs btcontainer) sel))
+    (aref (childs btcontainer) sel))
   (:method ((btcontainer btstructured) (sel symbol))
     (or (gethash sel (childs btcontainer)) (error "BTSTRUCTURED ~S has no field called ~S." btcontainer sel))))
 
 (defgeneric (setf cref) (val container sel)
   (:documentation "Set a child of a BTCONTAINER.")
   (:method (val (btcontainer btordered) (sel integer))
-    (setf (elt (childs btcontainer) sel) val))
+    (setf (aref (childs btcontainer) sel) val))
   (:method (val (btcontainer btstructured) (sel symbol))
     (setf (gethash sel (childs btcontainer)) val)))
 
@@ -140,6 +148,7 @@
     (declare (ignore op))
     (lambda-list-application-types-match-p (apply-typespec typeset typespec) params)))
 
+;; Note: the only user of 'custom processing' is the non-working typecase.
 (defun generic-typestack (typespec)
   (op-parameter-destructurer (op params) typespec
     (declare (ignore op))
@@ -148,10 +157,16 @@
           rest-of-typestack
           (cons (when params `(list ,@(map-lambda-list #'quote-when (apply-typespec 'quotation typespec) params))) rest-of-typestack)))))
 
+(defun runtime-typestack (typespec)
+  (op-parameter-destructurer (op params) typespec
+    (declare (ignore op))
+    (cons params (apply-typespec 'runtime-type-paramstack typespec))))
+
 (define-primitive-type unsigned-byte (width)
   (defun apply-safe-parameter-types () '((integer 0)))
   (defun constant-width (width) (/ width 8))
   (defun type-paramstack ())
+  (defun runtime-type-paramstack ())
   (defun initargs (width)
     (list 'btleaf
 	  :value-fn (case width
@@ -168,6 +183,7 @@
   (defun apply-safe-parameter-types () '(t t))
   (defun constant-width () 0)
   (defun type-paramstack ())
+  (defun runtime-type-paramstack ())
   (defun initargs (expression)
     (list 'btleaf :value-fn (constantly expression) :width 0))
   (defun cl-type (typespec)
@@ -179,6 +195,7 @@
   (defun apply-safe-parameter-types () '((integer 0)))
   (defun constant-width () 0)
   (defun type-paramstack ())
+  (defun runtime-type-paramstack ())
   (defun initargs ()
     (list 'btleaf :value-fn #'offset :width 0))
   (defun cl-type (width)
@@ -197,6 +214,7 @@
   (defun apply-safe-parameter-types () '((integer 0)))
   (defun constant-width (dimension) dimension)
   (defun type-paramstack ())
+  (defun runtime-type-paramstack ())
   (defun initargs (dimension)
     (list 'btleaf :value-fn (curry #'consume-zero-terminated-string dimension) :width dimension))
   (defun cl-type ()
@@ -208,6 +226,7 @@
   (defun apply-safe-parameter-types () '((integer 0) &optional t))
   (defun constant-width (dimension) dimension)
   (defun type-paramstack ())
+  (defun runtime-type-paramstack ())
   (defun initargs (dimension package)
     (list 'btleaf :value-fn (compose (the function (rcurry #'intern package)) #'string-upcase (the function (curry #'consume-zero-terminated-string dimension)))
                   :width dimension))
@@ -224,8 +243,8 @@
                                          (and (typespec-types-match-p 'apply-safe-parameter-types element-type)
                                               (apply-typespec 'constant-width element-type))))))
       (* constant-stride dimension)))
-  (defun type-paramstack (element-type)
-    (generic-typestack element-type))
+  (defun type-paramstack (element-type) (generic-typestack element-type))
+  (defun runtime-type-paramstack (element-type) (runtime-typestack element-type))
   (defun initargs (dimension element-type stride stride-fn)
     (unless (primitive-type-p element-type)
       (error "unknown sequence element type ~S." element-type))
@@ -245,6 +264,22 @@
   (defun quotation ()
     '(nil &key (element-type t) stride stride-fn format)))
 
+(define-primitive-type orderedpack (stream-size &key element-type (format :list))
+  (defun apply-safe-parameter-types () '((integer 0) &key (element-type t) (format t)))
+  (defun constant-width (stream-size) stream-size)
+  (defun type-paramstack (element-type) (generic-typestack element-type))
+  (defun runtime-type-paramstack (element-type) (runtime-typestack element-type))
+  (defun initargs (stream-size element-type)
+    (unless (primitive-type-p element-type)
+      (error "unknown sequence element type ~S." element-type))
+    (list 'btorderedpack :element-type element-type :width stream-size))
+  (defun cl-type (element-type format)
+    (ecase format
+      (:list 'list)
+      (:vector `(vector ,(apply-typespec 'cl-type element-type)))))
+  (defun quotation ()
+    '(nil &key (element-type t) format)))
+
 ;;; Warning: DISPATCH-VALUE is the only known instance of double evaluation. Not easy to get rid of.
 (define-primitive-type typecase (dispatch-value &rest types)
   (defun apply-safe-parameter-types () '(nil &rest nil))
@@ -256,16 +291,17 @@
                                (collect `(,signature ,@(generic-typestack type))))
                        (t (error "no type for dispatch value ~S" ,dispatch-value)))))
             t))
+  (defun runtime-type-paramstack () (error "Broken."))
   (defun cl-type (types)
     `(or ,@(mapcar (compose (curry #'apply-typespec 'cl-type) #'cadr) types)))
   (defun quotation ()
     `(&rest nil))
-  (defmacro initargs (dispatch-value types)
+  (defun initargs (dispatch-value types)
     (once-only (dispatch-value)
-      `(case ,dispatch-value
-	 ,@(iter (for (signature type) in types)
-		 (collect `(,signature (eval-typespec initargs ,type))))
-	 (t (error "no type for dispatch value ~S" ,dispatch-value))))))
+      (case dispatch-value
+	 `',@(iter (for (signature type) in types)
+                   (collect `(,signature (eval-typespec initargs ,type))))
+	 (t (error "no type for dispatch value ~S" dispatch-value))))))
 
 (defstruct bintype
   (name nil :type symbol)
@@ -277,7 +313,6 @@
   toplevels)
 
 (defun bintype (name)
-  (declare (type symbol name))
   (or (gethash name *bintypes*) (error "Unable to find the requested bintype ~S." name)))
 
 (defun bintype-toplevel (bintype name)
@@ -285,7 +320,7 @@
 
 (defun btstructured-constant-width (type-name)
   (let ((typespecs (mapcar (curry #'apply-toplevel-op 'typespec) (bintype-toplevels (bintype type-name)))))
-    (when (every (curry #'apply-typespec 'apply-safe-parameter-types) typespecs)
+    (when (every (curry #'typespec-types-match-p 'apply-safe-parameter-types) typespecs)
       (reduce #'(lambda (x y) (when (and x y) (+ x y)))
               (mapcar (curry #'apply-typespec 'constant-width) typespecs)))))
 
@@ -304,6 +339,20 @@
             (- (funcall (apply (bintype-paver bintype) (first (params obj))) (offset obj)) (offset obj)))))
   (:method ((obj btordered))
     (map 'null #'pave (slot-value obj 'childs)))
+;;   (:method ((obj btorderedpack))
+;;     (flet ((pave-btorderedpack (obj stream-size &key element-type (format :list))
+;;              (declare (ignore format))
+;;              (op-parameter-destructurer (op params) element-type
+;;                (declare (ignore params))
+;;                (let ((initargs (apply-typespec 'initargs (cons op (second (params obj)))))
+;;                      (offset 0))
+;;                  (iter (while (< offset space-left))
+;;                        (for offset initially (offset obj) then (+ offset (funcall (btfuncstride-stride-fn obj) i)))
+;;                        (apply #'make-instance (first initargs) :typespec element-type :offset offset :parent obj :sub-id i :params (rest (params obj))
+;;                               (rest initargs)))))))
+;;       (prog1
+;;           (apply #'pave-btfuncstride obj (first (params obj)))
+;;         (call-next-method))))
   (:method ((obj btfuncstride))
     (flet ((pave-btfuncstride (obj dimension &key element-type stride stride-fn (format :list))
              (declare (ignore stride stride-fn format))
@@ -312,10 +361,12 @@
                (let ((initargs (apply-typespec 'initargs (cons op (second (params obj))))))
                  (iter (for i below dimension)
                        (for offset initially (offset obj) then (+ offset (funcall (btfuncstride-stride-fn obj) i)))
-                       (apply #'make-instance (first initargs) :typespec element-type :offset offset :parent obj :sub-id i :initial-to-final-fn #'values :params (rest (params obj))
-                              (rest initargs)))))))
-      (apply #'pave-btfuncstride obj (first (params obj))))
-    (call-next-method)))
+                       (apply #'make-instance (first initargs) :typespec element-type :offset offset :parent obj :sub-id i :params (rest (params obj))
+                              (rest initargs))
+                       (finally (return offset)))))))
+      (prog1
+          (apply #'pave-btfuncstride obj (first (params obj)))
+        (call-next-method)))))
 
 (define-evaluation-domain toplevel-op)
 
@@ -325,7 +376,8 @@
     (lambda-list-application-types-match-p (apply-toplevel-op typeset toplevel) params)))
 
 (defun process-field (obj immediate-p stream-offset out-of-stream-offset)
-  (pave obj)
+  (when (typep obj 'btcontainer) 
+    (pave obj))
   (when immediate-p
     (fill-value obj))
   (values (+ stream-offset (if out-of-stream-offset 0 (width obj)))
@@ -338,13 +390,14 @@
         (typespec (apply-toplevel-op 'typespec toplevel))
         (quoted-toplevel (map-lambda-list #'quote-when (cons nil (apply-toplevel-op 'quotation toplevel)) toplevel)))
     (with-gensyms (start-offset o-o-s-offset paramstack initargs field-obj)
-      (with-named-lambda-emission (format-symbol nil "~S-~S-PAVEMENT" bintype-name name) (list start-offset)
+      (with-named-lambda-emission (format-symbol nil "~A-~A-PAVEMENT" bintype-name name) (list start-offset)
         `(declare (special *self*))
         `(let* (,@(unless no-oos `((,o-o-s-offset (eval-toplevel-op out-of-stream-offset ,quoted-toplevel))))
                 (,paramstack (list ,@(generic-typestack typespec))) (,initargs (apply-typespec 'initargs (cons ',(first typespec) (first ,paramstack))))
                 (,field-obj (apply #'make-instance (first ,initargs) :offset ,(if no-oos start-offset `(or ,o-o-s-offset ,start-offset)) :parent *self* :sub-id ',name
-                                                                     :typespec ',typespec :initial-to-final-fn ,(apply-toplevel-op 'initial-to-final-xform toplevel)
-                                                                     :params ,paramstack (rest ,initargs))))
+                                                                     :typespec ',typespec :params ,paramstack
+                                                                     ,@(when-let ((i-t-f-f (apply-toplevel-op 'initial-to-final-xform toplevel)))
+                                                                                 `(:initial-to-final-fn ,i-t-f-f)) (rest ,initargs))))
            (process-field ,field-obj ,(apply-toplevel-op 'immediate-eval toplevel) ,start-offset ,(unless no-oos o-o-s-offset)))))))
 
 (defun set-endianness (val)
@@ -352,7 +405,7 @@
   (funcall *endianness-setter* val))
 
 (defun output-paver-lambda (name lambda-list toplevels total-length)
-  (with-named-lambda-emission (format-symbol nil "PAVE-~S" name) lambda-list
+  (with-named-lambda-emission (format-symbol nil "PAVE-~A" name) lambda-list
     `(declare (special *total-length* *sequence*))
     (case total-length
       (:length `(setf *total-length* (length *sequence*)))
@@ -481,8 +534,10 @@
     (declare (special *endianness-setter*))
     (funcall *endianness-setter* endianness)
     (op-parameter-destructurer (op params) typespec
-      (let* ((bintype (bintype op))
-             (obj (make-instance 'btstructured :bintype bintype :offset offset :params (list params) :typespec typespec)))
+      (declare (ignore params))
+      (let* ((paramstack (runtime-typestack typespec))
+             (initargs (apply-typespec 'initargs (cons op (first paramstack))))
+             (obj (apply #'make-instance (first initargs) :offset offset :typespec typespec :params paramstack (rest initargs))))
         (pave obj)
         (fill-value obj)))))
 
@@ -499,8 +554,9 @@
 	 (defstruct ,type-name ,@(mapcar #'output-defstruct-field producing-toplevels))
 	 (define-primitive-type ,type-name ,lambda-list
            (defun apply-safe-parameter-types () '(&rest (integer 0)))
-	   (defun constant-width () (btstructured-constant-width ',type-name))
            (defun type-paramstack ())
+           (defun runtime-type-paramstack ())
+           (defun constant-width () (btstructured-constant-width ',type-name))
 	   (defun initargs ,(lambda-list-binds lambda-list) (declare (ignorable ,@(lambda-list-binds lambda-list)))
                   (list 'btstructured :bintype (bintype ',type-name)))
 	   (defun cl-type () ',type-name)
