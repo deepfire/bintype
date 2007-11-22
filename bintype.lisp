@@ -260,6 +260,7 @@
   (defun cl-type (element-type format)
     (ecase format
       (:list 'list)
+      (:simple-vector 'simple-vector)
       (:vector `(vector ,(apply-typespec 'cl-type element-type)))))
   (defun quotation ()
     '(nil &key (element-type t) stride stride-fn format)))
