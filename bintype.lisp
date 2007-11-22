@@ -5,7 +5,7 @@
    #:match #:plain #:indirect
    #:pure #:current-offset #:zero-terminated-string #:zero-terminated-symbol #:funcstride-sequence
    #:set-endianness #:offset #:parent #:sub #:value #:path-value
-   #:*self* #:*direct-value* #:*total-length*))
+   #:*self* #:*direct-value*))
 
 (in-package :bintype)
 
@@ -334,8 +334,8 @@
       (setf (paving-p obj) nil
             (paved-p obj) t)))
   (:method ((obj btstructured))
-    (let ((*self* obj) *total-length* (bintype (btstructured-bintype obj)))
-      (declare (special *self* *total-length* *sequence*))
+    (let ((*self* obj) (bintype (btstructured-bintype obj)))
+      (declare (special *self* *sequence*))
       (setf (width obj)
             (- (funcall (apply (bintype-paver bintype) (first (params obj))) (offset obj)) (offset obj)))))
   (:method ((obj btordered))
@@ -405,16 +405,9 @@
   (declare (type (member :little-endian :big-endian) val) (special *endianness-setter*))
   (funcall *endianness-setter* val))
 
-(defun output-paver-lambda (name lambda-list toplevels total-length)
+(defun output-paver-lambda (name lambda-list toplevels)
   (with-named-lambda-emission (format-symbol nil "PAVE-~A" name) lambda-list
-    `(declare (special *total-length* *sequence*))
-    (case total-length
-      (:length `(setf *total-length* (length *sequence*)))
-      (:array-dimension `(if (subtypep (type-of *sequence*) 'vector)
-                             (setf *total-length* (array-dimension *sequence* 0))
-                             (error "this bintype requires the sequence to be a vector.")))
-      ((nil))
-      (t (error "total-length must be of type (member :array-dimension), was ~S." total-length)))
+    `(declare (special *sequence*))
     `(compose ,@(mapcar (curry #'emit-toplevel-pavement name) (reverse toplevels)))))
 
 (define-function-evaluations toplevel-op value (name typespec &key ignore out-of-stream-offset)
@@ -546,7 +539,6 @@
   (flet ((output-defstruct-field (toplevel)
 	   `(,(apply-toplevel-op 'name toplevel) nil :type ,(apply-toplevel-op 'cl-type-for-field toplevel))))
     (let* ((documentation (cadr (assoc :documentation f)))
-	   (total-length (cadr (assoc :total-length f)))
 	   (toplevels (cdr (assoc :fields f)))
 	   (producing-toplevels (remove-if-not (curry #'apply-toplevel-op 'emits-field-p) toplevels)))
       `(progn
@@ -569,7 +561,7 @@
 		      (setter-name (format-symbol (symbol-package ',type-name) "~A-~A" ',type-name field-name)))
 		 (setf (gethash field-name (bintype-field-setters bintype)) (fdefinition `(setf ,setter-name))))))
 	   (setf (bintype-instantiator bintype) #',(format-symbol (symbol-package type-name) "MAKE-~A" type-name)
-                 (bintype-paver bintype) ,(output-paver-lambda type-name lambda-list toplevels total-length)))))))
+                 (bintype-paver bintype) ,(output-paver-lambda type-name lambda-list toplevels)))))))
 
 (defun export-bintype-accessors (bintype)
   (let ((bintype-name (bintype-name bintype)))
