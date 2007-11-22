@@ -535,16 +535,25 @@
         (pave obj)
         (fill-value obj)))))
 
+(defun generic-slot-accessor-name (type-name slot-name)
+  (format-symbol (symbol-package type-name) "~A-~A" type-name slot-name))
+
 (defmacro defbintype (type-name lambda-list &body f)
-  (flet ((output-defstruct-field (toplevel)
+  (flet ((output-defclass-field (toplevel &aux (slot-name (apply-toplevel-op 'name toplevel)))
+	   `(,slot-name :accessor ,(generic-slot-accessor-name type-name slot-name) :initform nil :type ,(apply-toplevel-op 'cl-type-for-field toplevel)))
+         (output-defstruct-field (toplevel)
 	   `(,(apply-toplevel-op 'name toplevel) nil :type ,(apply-toplevel-op 'cl-type-for-field toplevel))))
     (let* ((documentation (cadr (assoc :documentation f)))
 	   (toplevels (cdr (assoc :fields f)))
+	   (type (or (cdr (assoc :type f)) :class))
 	   (producing-toplevels (remove-if-not (curry #'apply-toplevel-op 'emits-field-p) toplevels)))
+      (declare ((member :class :structure) type))
       `(progn
 	 (setf (gethash ',type-name *bintypes*)
 	       (make-bintype :name ',type-name :documentation ,documentation :lambda-list ',lambda-list :toplevels ',toplevels))
-	 (defstruct ,type-name ,@(mapcar #'output-defstruct-field producing-toplevels))
+         ,@(case type
+                 (:class `((defclass ,type-name () ,(mapcar #'output-defclass-field producing-toplevels))))
+                 (:structure `((defstruct ,type-name ,@(mapcar #'output-defstruct-field producing-toplevels)))))
 	 (define-primitive-type ,type-name ,lambda-list
            (defun apply-safe-parameter-types () '(&rest (integer 0)))
            (defun type-paramstack ())
@@ -558,9 +567,11 @@
 	   (dolist (toplevel (bintype-toplevels bintype))
 	     (when (apply-toplevel-op 'emits-field-p toplevel)
 	       (let* ((field-name (apply-toplevel-op 'name toplevel))
-		      (setter-name (format-symbol (symbol-package ',type-name) "~A-~A" ',type-name field-name)))
+		      (setter-name (generic-slot-accessor-name ',type-name field-name)))
 		 (setf (gethash field-name (bintype-field-setters bintype)) (fdefinition `(setf ,setter-name))))))
-	   (setf (bintype-instantiator bintype) #',(format-symbol (symbol-package type-name) "MAKE-~A" type-name)
+	   (setf (bintype-instantiator bintype) ,(case type
+                                                       (:class `(curry #'make-instance ',type-name))
+                                                       (:structure `#',(format-symbol (symbol-package type-name) "MAKE-~A" type-name)))
                  (bintype-paver bintype) ,(output-paver-lambda type-name lambda-list toplevels)))))))
 
 (defun export-bintype-accessors (bintype)
