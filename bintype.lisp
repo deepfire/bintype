@@ -67,7 +67,7 @@
 (defmethod print-object ((o btfuncstride) s)
   (format s "#<BTFUNCSTRIDE {~8,'0X} sub-id: ~S offset: ~X dimension: ~D element-type: ~S>"
 	  (sb-kernel:get-lisp-obj-address o) (slot-value-for-print o 'sub-id) (slot-value-for-print o 'offset)
-	  (length (childs o)) (btordered-element-type o)))
+	  (when (slot-boundp o 'childs) (length (childs o))) (btordered-element-type o)))
 
 (defmethod print-object ((o btstructured) s)
   (format s "#<BTSTRUCTURED sub-id: ~S offset: ~X bintype: ~S>"
@@ -91,7 +91,7 @@
   (setf (slot-value obj 'childs) (make-array (slot-value obj 'length-guess) :initial-element nil :adjustable t :fill-pointer 0)))
 
 (defmethod initialize-instance :after ((obj btstructured) &key runtime-slot-count &allow-other-keys)
-  (setf (slot-value obj 'childs) (make-array runtime-slot-count :initial-element nil :adjustable t :fill-pointer 0)))
+  (setf (slot-value obj 'childs) (make-array runtime-slot-count :initial-element nil :adjustable t)))
 
 (defstruct bintype
   (name nil :type symbol)
@@ -99,8 +99,8 @@
   lambda-list
   instantiator
   paver
-  (field-setters (make-hash-table))
-  runtime-slot-map
+  slot-map	;; the first (length producing-toplevels) elements are the producing ones
+  setter-map	;; the map for the producing elements
   toplevels)
 
 (defun bintype (name)
@@ -109,15 +109,15 @@
 (defun bintype-toplevel (bintype name)
   (find name (bintype-toplevels bintype) :key (curry #'apply-toplevel-op 'name)))
 
-(defun bintype-slot-number (bintype slot-name)
-  (position slot-name (bintype-runtime-slot-map bintype) :test #'eq))
+(defun slot-number (bintype slot-name)
+  (position slot-name (bintype-slot-map bintype) :test #'eq))
 
 (defgeneric cref (container sel)
   (:documentation "Reach for a child of a BTCONTAINER.")
   (:method ((btcontainer btordered) (sel integer))
     (aref (childs btcontainer) sel))
   (:method ((btcontainer btstructured) (sel symbol))
-    (if-let ((slot-number (bintype-slot-number (btstructured-bintype btcontainer) sel)))
+    (if-let ((slot-number (slot-number (btstructured-bintype btcontainer) sel)))
 	    (aref (childs btcontainer) slot-number)
 	    (error "BTSTRUCTURED ~S has no field called ~S." btcontainer sel))))
 
@@ -126,7 +126,7 @@
   (:method (val (btcontainer btordered) (sel integer))
     (setf (aref (childs btcontainer) sel) val))
   (:method (val (btcontainer btstructured) (sel symbol))
-    (if-let ((slot-number (bintype-slot-number (btstructured-bintype btcontainer) sel)))
+    (if-let ((slot-number (slot-number (btstructured-bintype btcontainer) sel)))
 	    (setf (aref (childs btcontainer) slot-number) val)
 	    (error "BTSTRUCTURED ~S has no field called ~S." btcontainer sel))))
 
@@ -316,7 +316,7 @@
             t))
   (defun runtime-type-paramstack () (error "Broken."))
   (defun cl-type (types)
-    `(or ,@(mapcar (compose (curry #'apply-typespec 'cl-type) #'cadr) types)))
+    `(or ,@(mapcar (compose (curry #'apply-typespec 'cl-type]) #'second) types)))
   (defun quotation ()
     `(&rest nil))
   (defun initargs (dispatch-value types)
@@ -483,10 +483,9 @@
   (:method ((obj btstructured))
     (let ((bintype (btstructured-bintype obj)))
       (setf (initial-value obj) (funcall (bintype-instantiator bintype)))
-      (dolist (toplevel (bintype-toplevels bintype))
-	(when (apply-toplevel-op 'emits-field-p toplevel)
-	  (let ((name (apply-toplevel-op 'name toplevel)))
-	    (funcall (gethash name (bintype-field-setters bintype)) (fill-value (cref obj name)) (initial-value obj))))))
+      (map 'null (lambda (fn subobj)
+		   (funcall fn (fill-value subobj) (initial-value obj)))
+	   (bintype-setter-map bintype) (childs obj)))
     (call-next-method)))
     
 (defun sub (obj selector)
@@ -549,20 +548,29 @@
   (flet ((output-defclass-field (toplevel &aux (slot-name (apply-toplevel-op 'name toplevel)))
 	   `(,slot-name :accessor ,(generic-slot-accessor-name type-name slot-name) :initform nil :type ,(apply-toplevel-op 'cl-type-for-field toplevel)))
          (output-defstruct-field (toplevel)
-	   `(,(apply-toplevel-op 'name toplevel) nil :type ,(apply-toplevel-op 'cl-type-for-field toplevel))))
+	   `(,(apply-toplevel-op 'name toplevel) nil :type ,(apply-toplevel-op 'cl-type-for-field toplevel)))
+	 (more-emitting-p (top-x top-y)
+	   (and (apply-toplevel-op 'emits-field-p top-x)
+		(null (apply-toplevel-op 'emits-field-p top-y)))))
     (let* ((documentation (cadr (assoc :documentation f)))
-	   (toplevels (cdr (assoc :fields f)))
 	   (type (or (cadr (assoc :type f)) :class))
-	   (producing-toplevels (remove-if-not (curry #'apply-toplevel-op 'emits-field-p) toplevels)))
+	   (toplevels (cdr (assoc :fields f)))
+	   (emission-ordered-toplevels (sort (copy-list toplevels) #'more-emitting-p))
+	   (field-count (count-if (curry #'apply-toplevel-op 'emits-field-p) emission-ordered-toplevels))
+	   (producing-toplevels (subseq emission-ordered-toplevels 0 field-count)))
       (declare ((member :class :structure) type))
       `(progn
-	 (setf (gethash ',type-name *bintypes*)
-	       (make-bintype :name ',type-name :documentation ,documentation :lambda-list ',lambda-list :toplevels ',toplevels
-			     :runtime-slot-map (make-array ,(length toplevels)
-						:initial-contents ',(mapcar (curry #'apply-toplevel-op 'name) toplevels))))
-         ,@(case type
+	 ,@(case type
                  (:class `((defclass ,type-name () ,(mapcar #'output-defclass-field producing-toplevels))))
                  (:structure `((defstruct ,type-name ,@(mapcar #'output-defstruct-field producing-toplevels)))))
+         (let ((field-names ',(mapcar (compose (curry #'apply-toplevel-op 'name)) emission-ordered-toplevels)))
+	  (setf (gethash ',type-name *bintypes*)
+		(make-bintype :name ',type-name :documentation ,documentation :lambda-list ',lambda-list :toplevels ',toplevels
+			      :slot-map (make-array ,(length toplevels) :initial-contents field-names)
+			      :setter-map (make-array ,field-count
+					   :initial-contents (mapcar (compose #'fdefinition (curry #'list 'setf)
+									      (curry #'generic-slot-accessor-name ',type-name))
+								     (subseq field-names 0 ,field-count))))))
 	 (define-primitive-type ,type-name ,lambda-list
            (defun apply-safe-parameter-types () '(&rest (integer 0)))
            (defun type-paramstack ())
@@ -573,11 +581,6 @@
 	   (defun cl-type () ',type-name)
 	   (defun quotation () '(&rest nil)))
 	 (let* ((bintype (bintype ',type-name)))
-	   (dolist (toplevel (bintype-toplevels bintype))
-	     (when (apply-toplevel-op 'emits-field-p toplevel)
-	       (let* ((field-name (apply-toplevel-op 'name toplevel))
-		      (setter-name (generic-slot-accessor-name ',type-name field-name)))
-		 (setf (gethash field-name (bintype-field-setters bintype)) (fdefinition `(setf ,setter-name))))))
 	   (setf (bintype-instantiator bintype) ,(case type
                                                        (:class `(curry #'make-instance ',type-name))
                                                        (:structure `#',(format-symbol (symbol-package type-name) "MAKE-~A" type-name)))
@@ -587,4 +590,6 @@
   (let ((bintype-name (bintype-name bintype)))
     (export (list* bintype-name
 		   (iter (for toplevel in (bintype-toplevels bintype))
-			 (collect (format-symbol (symbol-package bintype-name) "~A-~A" bintype-name (apply-toplevel-op 'name toplevel))))))))
+			 (for name = (apply-toplevel-op 'name toplevel))
+			 (for symbol = (format-symbol (symbol-package bintype-name) "~A-~A" bintype-name name))
+			 (collect symbol))))))
