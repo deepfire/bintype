@@ -33,16 +33,13 @@
   ((element-type :accessor btordered-element-type :initarg :element-type)))
 
 (defclass btfuncstride (btordered)
-  ((dimension :accessor btfuncstride-dimension :initarg :dimension)
-   (stride-fn :accessor btfuncstride-stride-fn :initarg :stride-fn)))
+  ((stride-fn :accessor btfuncstride-stride-fn :initarg :stride-fn)))
 
 (defclass btorderedpack (btordered)
   ((length-guess :accessor btorderedpack-length-guess :initarg :length-guess)))
 
 (defclass btstructured (btcontainer)
-  ((bintype :accessor btstructured-bintype :initarg :bintype))
-  (:default-initargs
-   :childs (make-hash-table)))
+  ((bintype :accessor btstructured-bintype :initarg :bintype)))
 
 (defclass btleaf (btobj)
   ((value-fn :accessor btleaf-value-fn :initarg :value-fn)))
@@ -70,7 +67,7 @@
 (defmethod print-object ((o btfuncstride) s)
   (format s "#<BTFUNCSTRIDE {~8,'0X} sub-id: ~S offset: ~X dimension: ~D element-type: ~S>"
 	  (sb-kernel:get-lisp-obj-address o) (slot-value-for-print o 'sub-id) (slot-value-for-print o 'offset)
-	  (btfuncstride-dimension o) (btordered-element-type o)))
+	  (length (childs o)) (btordered-element-type o)))
 
 (defmethod print-object ((o btstructured) s)
   (format s "#<BTSTRUCTURED sub-id: ~S offset: ~X bintype: ~S>"
@@ -86,27 +83,52 @@
   (when (slot-boundp obj 'parent)
     (setf (cref (parent obj) (sub-id obj)) obj)))
 
-(defmethod initialize-instance :after ((obj btfuncstride) &rest rest)
-  (declare (ignore rest))
-  (setf (slot-value obj 'childs) (make-array (slot-value obj 'dimension) :initial-element nil)))
+(defmethod initialize-instance :after ((obj btfuncstride) &key dimension &allow-other-keys)
+  (setf (slot-value obj 'childs) (make-array dimension :initial-element nil)))
 
 (defmethod initialize-instance :after ((obj btorderedpack) &rest rest)
   (declare (ignore rest))
   (setf (slot-value obj 'childs) (make-array (slot-value obj 'length-guess) :initial-element nil :adjustable t :fill-pointer 0)))
+
+(defmethod initialize-instance :after ((obj btstructured) &key runtime-slot-count &allow-other-keys)
+  (setf (slot-value obj 'childs) (make-array runtime-slot-count :initial-element nil :adjustable t :fill-pointer 0)))
+
+(defstruct bintype
+  (name nil :type symbol)
+  (documentation nil :type (or null string))
+  lambda-list
+  instantiator
+  paver
+  (field-setters (make-hash-table))
+  runtime-slot-map
+  toplevels)
+
+(defun bintype (name)
+  (or (gethash name *bintypes*) (error "Unable to find the requested bintype ~S." name)))
+
+(defun bintype-toplevel (bintype name)
+  (find name (bintype-toplevels bintype) :key (curry #'apply-toplevel-op 'name)))
+
+(defun bintype-slot-number (bintype slot-name)
+  (position slot-name (bintype-runtime-slot-map bintype) :test #'eq))
 
 (defgeneric cref (container sel)
   (:documentation "Reach for a child of a BTCONTAINER.")
   (:method ((btcontainer btordered) (sel integer))
     (aref (childs btcontainer) sel))
   (:method ((btcontainer btstructured) (sel symbol))
-    (or (gethash sel (childs btcontainer)) (error "BTSTRUCTURED ~S has no field called ~S." btcontainer sel))))
+    (if-let ((slot-number (bintype-slot-number (btstructured-bintype btcontainer) sel)))
+	    (aref (childs btcontainer) slot-number)
+	    (error "BTSTRUCTURED ~S has no field called ~S." btcontainer sel))))
 
 (defgeneric (setf cref) (val container sel)
   (:documentation "Set a child of a BTCONTAINER.")
   (:method (val (btcontainer btordered) (sel integer))
     (setf (aref (childs btcontainer) sel) val))
   (:method (val (btcontainer btstructured) (sel symbol))
-    (setf (gethash sel (childs btcontainer)) val)))
+    (if-let ((slot-number (bintype-slot-number (btstructured-bintype btcontainer) sel)))
+	    (setf (aref (childs btcontainer) slot-number) val)
+	    (error "BTSTRUCTURED ~S has no field called ~S." btcontainer sel))))
 
 (defun generic-u8-reader (obj)
   (declare (special *sequence*))
@@ -303,21 +325,6 @@
 	 `',@(iter (for (signature type) in types)
                    (collect `(,signature (eval-typespec initargs ,type))))
 	 (t (error "no type for dispatch value ~S" dispatch-value))))))
-
-(defstruct bintype
-  (name nil :type symbol)
-  (documentation nil :type (or null string))
-  lambda-list
-  instantiator
-  paver
-  (field-setters (make-hash-table))
-  toplevels)
-
-(defun bintype (name)
-  (or (gethash name *bintypes*) (error "Unable to find the requested bintype ~S." name)))
-
-(defun bintype-toplevel (bintype name)
-  (find name (bintype-toplevels bintype) :key (curry #'apply-toplevel-op 'name)))
 
 (defun btstructured-constant-width (type-name)
   (let ((typespecs (mapcar (curry #'apply-toplevel-op 'typespec) (bintype-toplevels (bintype type-name)))))
@@ -550,7 +557,9 @@
       (declare ((member :class :structure) type))
       `(progn
 	 (setf (gethash ',type-name *bintypes*)
-	       (make-bintype :name ',type-name :documentation ,documentation :lambda-list ',lambda-list :toplevels ',toplevels))
+	       (make-bintype :name ',type-name :documentation ,documentation :lambda-list ',lambda-list :toplevels ',toplevels
+			     :runtime-slot-map (make-array ,(length toplevels)
+						:initial-contents ',(mapcar (curry #'apply-toplevel-op 'name) toplevels))))
          ,@(case type
                  (:class `((defclass ,type-name () ,(mapcar #'output-defclass-field producing-toplevels))))
                  (:structure `((defstruct ,type-name ,@(mapcar #'output-defstruct-field producing-toplevels)))))
@@ -560,7 +569,7 @@
            (defun runtime-type-paramstack ())
            (defun constant-width () (btstructured-constant-width ',type-name))
 	   (defun initargs ,(lambda-list-binds lambda-list) (declare (ignorable ,@(lambda-list-binds lambda-list)))
-                  (list 'btstructured :bintype (bintype ',type-name)))
+                  (list 'btstructured :bintype (bintype ',type-name) :runtime-slot-count ,(length toplevels)))
 	   (defun cl-type () ',type-name)
 	   (defun quotation () '(&rest nil)))
 	 (let* ((bintype (bintype ',type-name)))
