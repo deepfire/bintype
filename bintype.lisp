@@ -545,7 +545,7 @@
 	   `(,(apply-toplevel-op 'name toplevel) nil :type ,(apply-toplevel-op 'cl-type-for-field toplevel))))
     (let* ((documentation (cadr (assoc :documentation f)))
 	   (toplevels (cdr (assoc :fields f)))
-	   (type (or (cdr (assoc :type f)) :class))
+	   (type (or (cadr (assoc :type f)) :class))
 	   (producing-toplevels (remove-if-not (curry #'apply-toplevel-op 'emits-field-p) toplevels)))
       (declare ((member :class :structure) type))
       `(progn
