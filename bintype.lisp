@@ -3,7 +3,7 @@
   (:export
    #:bintype #:define-primitive-type #:defbintype #:parse #:export-bintype-accessors
    #:match #:plain #:indirect
-   #:pure #:current-offset #:zero-terminated-string #:zero-terminated-symbol #:funcstride-sequence
+   #:pure #:current-offset #:displaced-u8-vector #:zero-terminated-string #:zero-terminated-symbol #:funcstride-sequence
    #:set-endianness #:offset #:parent #:sub #:value #:path-value
    #:*self* #:*direct-value*))
 
@@ -212,6 +212,24 @@
     (apply-typespec 'cl-type typespec))
   (defun quotation ()
     '(t nil)))
+
+(defun consume-displaced-u8-vector (dimension obj)
+  (declare (special *sequence*))
+  (unless (typep *sequence* '(vector (unsigned-byte 8)))
+    (error "underlying sequence type ~S is not subtype of (vector (unsigned-byte 8)), as required by displaced-u8-vector" (type-of *sequence*)))
+  (make-array dimension :element-type '(unsigned-byte 8) :displaced-to *sequence* :displaced-index-offset (offset obj)))
+
+(define-primitive-type displaced-u8-vector (length)
+  (defun apply-safe-parameter-types () '((integer 0)))
+  (defun constant-width (length) length)
+  (defun type-paramstack ())
+  (defun runtime-type-paramstack ())
+  (defun initargs (length)
+    (list 'btleaf :value-fn (curry #'consume-displaced-u8-vector length) :width length))
+  (defun cl-type ()
+    `(vector (unsigned-byte 8)))
+  (defun quotation ()
+    '(nil)))
   
 (define-primitive-type current-offset (width)
   (defun apply-safe-parameter-types () '((integer 0)))
