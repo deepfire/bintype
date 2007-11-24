@@ -334,7 +334,7 @@
             t))
   (defun runtime-type-paramstack () (error "Broken."))
   (defun cl-type (types)
-    `(or ,@(mapcar (compose (curry #'apply-typespec 'cl-type]) #'second) types)))
+    `(or ,@(mapcar (compose (curry #'apply-typespec 'cl-type) #'second) types)))
   (defun quotation ()
     `(&rest nil))
   (defun initargs (dispatch-value types)
