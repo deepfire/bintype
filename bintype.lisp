@@ -1,7 +1,7 @@
 (defpackage bintype
   (:use :common-lisp :alexandria :pergamum :iterate)
   (:export
-   #:bintype #:define-primitive-type #:defbintype #:parse #:export-bintype-accessors
+   #:bintype #:define-primitive-type #:defbintype #:parse #:export-bintype
    #:match #:plain #:indirect
    #:pure #:current-offset #:displaced-u8-vector #:zero-terminated-string #:zero-terminated-symbol #:funcstride-sequence
    #:set-endianness #:offset #:parent #:sub #:value #:path-value
@@ -604,10 +604,11 @@
                                                        (:structure `#',(format-symbol (symbol-package type-name) "MAKE-~A" type-name)))
                  (bintype-paver bintype) ,(output-paver-lambda type-name lambda-list toplevels)))))))
 
-(defun export-bintype-accessors (bintype)
+(defun export-bintype (bintype)
   (let ((bintype-name (bintype-name bintype)))
     (export (list* bintype-name
 		   (iter (for toplevel in (bintype-toplevels bintype))
 			 (for name = (apply-toplevel-op 'name toplevel))
 			 (for symbol = (format-symbol (symbol-package bintype-name) "~A-~A" bintype-name name))
+                         (collect name)
 			 (collect symbol))))))
