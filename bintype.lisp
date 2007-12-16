@@ -416,8 +416,8 @@
         (typespec (apply-toplevel-op 'typespec toplevel))
         (quoted-toplevel (map-lambda-list #'quote-when (cons nil (apply-toplevel-op 'quotation toplevel)) toplevel)))
     (with-gensyms (start-offset o-o-s-offset paramstack initargs field-obj)
-      (with-named-lambda-emission (format-symbol nil "~A-~A-PAVEMENT" bintype-name name) (list start-offset)
-        `(declare (special *self*))
+      (with-named-lambda-emission ((format-symbol nil "~A-~A-PAVEMENT" bintype-name name) (list start-offset)
+                                   :declarations (emit-declarations :special '(*self*)))
         `(let* (,@(unless no-oos `((,o-o-s-offset (eval-toplevel-op out-of-stream-offset ,quoted-toplevel))))
                 (,paramstack (list ,@(generic-typestack typespec))) (,initargs (apply-typespec 'initargs (cons ',(first typespec) (first ,paramstack))))
                 (,field-obj (apply #'make-instance (first ,initargs) :offset ,(if no-oos start-offset `(or ,o-o-s-offset ,start-offset)) :parent *self* :sub-id ',name
@@ -431,8 +431,8 @@
   (funcall *endianness-setter* val))
 
 (defun output-paver-lambda (name lambda-list toplevels)
-  (with-named-lambda-emission (format-symbol nil "PAVE-~A" name) lambda-list
-    `(declare (special *sequence*))
+  (with-named-lambda-emission ((format-symbol nil "PAVE-~A" name) lambda-list
+                               :declarations (emit-declarations :special '(*sequence*)))
     `(compose ,@(mapcar (curry #'emit-toplevel-pavement name) (reverse toplevels)))))
 
 (define-function-evaluations toplevel-op value (name typespec &key ignore out-of-stream-offset)
@@ -483,7 +483,7 @@
   (quotation ()					'(t t &rest nil))
   (no-oos ()					'(t t &key (ignore t) (out-of-stream-offset null) (final-value t)))
   (immediate-eval (result-toplevel)		(apply-toplevel-op 'immediate-eval result-toplevel))
-  (initial-to-final-xform (result-toplevel)	`(compose ,(apply-toplevel-op 'initial-to-final-xform result-toplevel)
+  (initial-to-final-xform (result-toplevel)     `(compose ,(apply-toplevel-op 'initial-to-final-xform result-toplevel)
                                                           ,(emit-lambda `(*direct-value* obj &aux (*self* (parent obj)))
                                                                         `((fill-value (nth-value 1 (funcall ,(emit-toplevel-pavement nil result-toplevel) (offset obj)))))
                                                                         :declarations (emit-declarations :special `(*self* *direct-value*))))))
