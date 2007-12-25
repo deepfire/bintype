@@ -216,11 +216,11 @@
 (define-condition displacement-out-of-range (error)
   ((offset :accessor condition-offset :initarg :offset)
    (length :accessor condition-length :initarg :length)
-   (misfit :accessor condition-misfir :initarg :misfit))
+   (misfit :accessor condition-misfit :initarg :misfit))
   (:report
    (lambda (cond stream)
      (format stream "~@<displaced vector of length ~S at offset ~S doesn't fit the underlying sequence by ~S elements~:@>"
-             (condition-length cond) (condition-offset cond) (- (condition-length cond) (condition-available-length cond))))))
+             (condition-length cond) (condition-offset cond) (- (condition-length cond) (condition-misfit cond))))))
 
 (defun stream-format (format-string &rest rest)
   (lambda (stream)
