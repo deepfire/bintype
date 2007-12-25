@@ -213,10 +213,29 @@
   (defun quotation ()
     '(t nil)))
 
+(define-condition displacement-out-of-range (error)
+  ((offset :accessor condition-offset :initarg :offset)
+   (length :accessor condition-length :initarg :length)
+   (misfit :accessor condition-misfir :initarg :misfit))
+  (:report
+   (lambda (cond stream)
+     (format stream "~@<displaced vector of length ~S at offset ~S doesn't fit the underlying sequence by ~S elements~:@>"
+             (condition-length cond) (condition-offset cond) (- (condition-length cond) (condition-available-length cond))))))
+
+(defun stream-format (format-string &rest rest)
+  (lambda (stream)
+    (apply #'format stream format-string rest)))
+
 (defun consume-displaced-u8-vector (dimension obj)
   (declare (special *sequence*))
   (unless (typep *sequence* '(vector (unsigned-byte 8)))
     (error "underlying sequence type ~S is not subtype of (vector (unsigned-byte 8)), as required by displaced-u8-vector" (type-of *sequence*)))
+  (let ((misfit (- (+ (offset obj) dimension) (array-dimension *sequence* 0))))
+    (restart-case (when (plusp misfit)
+                    (error 'displacement-out-of-range :length dimension :offset (offset obj) :misfit misfit))
+      (trim ()
+       :report "Trim the displaced vector to fit."
+       (decf dimension misfit))))
   (make-array dimension :element-type '(unsigned-byte 8) :displaced-to *sequence* :displaced-index-offset (offset obj)))
 
 (define-primitive-type displaced-u8-vector (length)
