@@ -233,8 +233,9 @@
   (let ((misfit (- (+ (offset obj) dimension) (array-dimension *sequence* 0))))
     (restart-case (when (plusp misfit)
                     (error 'displacement-out-of-range :length dimension :offset (offset obj) :misfit misfit))
-      (trim ()
+      (trim (cond)
        :report "Trim the displaced vector to fit."
+       (declare (ignore cond))
        (decf dimension misfit))))
   (make-array dimension :element-type '(unsigned-byte 8) :displaced-to *sequence* :displaced-index-offset (offset obj)))
 
