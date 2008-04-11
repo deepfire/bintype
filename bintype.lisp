@@ -150,18 +150,16 @@
     (gethash op *primitive-types*)))
 
 (defmacro define-primitive-type (name lambda-list &body body)
-  (let ((functions (remove-if-not (compose (curry #'eq 'defun) #'car) body))
-	(macros (remove-if-not (compose (curry #'eq 'defmacro) #'car) body)))
-    `(progn
-       (when (primitive-type-p ',name)
-	 (warn "redefining ~S in DEFINE-PRIMITIVE-TYPE" ',name))
-       (setf (gethash ',name *primitive-types*) t)
-       ,@(when functions
-	   `((define-function-evaluations typespec ,name ,lambda-list
-	       ,@(mapcar #'rest functions))))
-       ,@(when macros
-	   `((define-macro-evaluations typespec ,name ,lambda-list
-	       ,@(mapcar #'rest macros)))))))
+  `(progn
+     (when (primitive-type-p ',name)
+       (warn "redefining ~S in DEFINE-PRIMITIVE-TYPE" ',name))
+     (setf (gethash ',name *primitive-types*) t)
+     ,@(when-let ((functions (remove 'defun body :key #'car :test-not #'eq)))
+                 `((define-function-evaluations typespec ,name ,lambda-list
+                                                ,@(mapcar #'rest functions))))
+     ,@(when-let ((macros (remove 'defmacro body :key #'car :test-not #'eq)))
+                 `((define-macro-evaluations typespec ,name ,lambda-list
+                                             ,@(mapcar #'rest macros))))))
 
 (define-evaluation-domain typespec)
 
