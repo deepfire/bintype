@@ -358,8 +358,9 @@
   (defun initargs (dispatch-value types)
     (once-only (dispatch-value)
       (case dispatch-value
-	 `',@(iter (for (signature type) in types)
-                   (collect `(,signature (eval-typespec initargs ,type))))
+	 (cons 'quote
+               (iter (for (signature type) in types)
+                     (collect `(,signature (eval-typespec initargs ,type)))))
 	 (t (error "no type for dispatch value ~S" dispatch-value))))))
 
 (defun btstructured-constant-width (type-name)
