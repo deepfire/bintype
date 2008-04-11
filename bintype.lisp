@@ -65,8 +65,8 @@
   (when (slot-boundp o slot) (slot-value o slot)))
 
 (defmethod print-object ((o btfuncstride) s)
-  (format s "#<BTFUNCSTRIDE {~8,'0X} sub-id: ~S offset: ~X dimension: ~D element-type: ~S>"
-	  (sb-kernel:get-lisp-obj-address o) (slot-value-for-print o 'sub-id) (slot-value-for-print o 'offset)
+  (format s "#<BTFUNCSTRIDE sub-id: ~S offset: ~X dimension: ~D element-type: ~S>"
+	  (slot-value-for-print o 'sub-id) (slot-value-for-print o 'offset)
 	  (when (slot-boundp o 'childs) (length (childs o))) (btordered-element-type o)))
 
 (defmethod print-object ((o btstructured) s)
@@ -75,8 +75,8 @@
 	  (bintype-name (btstructured-bintype o))))
 
 (defmethod print-object ((o btleaf) s)
-  (format s "#<BTLEAF {~8,'0X} sub-id: ~S offset: ~X>"
-	  (sb-kernel:get-lisp-obj-address o) (slot-value-for-print o 'sub-id) (slot-value-for-print o 'offset)))
+  (format s "#<BTLEAF sub-id: ~S offset: ~X>"
+	  (slot-value-for-print o 'sub-id) (slot-value-for-print o 'offset)))
 
 (defmethod initialize-instance :after ((obj btobj) &rest rest)
   (declare (ignore rest))
@@ -596,7 +596,7 @@
 	   (emission-ordered-toplevels (sort (copy-list toplevels) #'more-emitting-p))
 	   (field-count (count-if (curry #'apply-toplevel-op 'emits-field-p) emission-ordered-toplevels))
 	   (producing-toplevels (subseq emission-ordered-toplevels 0 field-count)))
-      (declare ((member :class :structure) type))
+      (declare (type (member :class :structure) type))
       `(progn
 	 ,@(case type
                  (:class `((defclass ,type-name () ,(mapcar #'output-defclass-field producing-toplevels))))
