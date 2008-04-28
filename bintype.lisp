@@ -594,20 +594,24 @@
 	   (toplevels (cdr (assoc :fields f)))
 	   (emission-ordered-toplevels (sort (copy-list toplevels) #'more-emitting-p))
 	   (field-count (count-if (curry #'apply-toplevel-op 'emits-field-p) emission-ordered-toplevels))
-	   (producing-toplevels (subseq emission-ordered-toplevels 0 field-count)))
+	   (producing-toplevels (subseq emission-ordered-toplevels 0 field-count))
+           (field-names (mapcar (compose (curry #'apply-toplevel-op 'name)) emission-ordered-toplevels)))
       (declare (type (member :class :structure) type))
       `(progn
 	 ,@(case type
                  (:class `((defclass ,type-name () ,(mapcar #'output-defclass-field producing-toplevels))))
                  (:structure `((defstruct ,type-name ,@(mapcar #'output-defstruct-field producing-toplevels)))))
-         (let ((field-names ',(mapcar (compose (curry #'apply-toplevel-op 'name)) emission-ordered-toplevels)))
+         (let ((field-names ',field-names))
 	  (setf (gethash ',type-name *bintypes*)
 		(make-bintype :name ',type-name :documentation ,documentation :lambda-list ',lambda-list :toplevels ',toplevels
 			      :slot-map (make-array ,(length toplevels) :initial-contents field-names)
-			      :setter-map (make-array ,field-count
-					   :initial-contents (mapcar (compose #'fdefinition (curry #'list 'setf)
-									      (curry #'generic-slot-accessor-name ',type-name))
-								     (subseq field-names 0 ,field-count))))))
+			      :setter-map
+                              (make-array ,field-count
+                               :initial-contents
+                               (list ,@(iter (for field-name in field-names)
+                                             (repeat field-count)
+                                             (collect `(lambda (val o)
+                                                         (setf (,(generic-slot-accessor-name type-name field-name) o) val)))))))))
 	 (define-primitive-type ,type-name ,lambda-list
            (defun apply-safe-parameter-types () '(&rest (integer 0)))
            (defun type-paramstack ())
