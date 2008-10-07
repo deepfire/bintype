@@ -162,6 +162,27 @@
   (declare (special *u32-reader* *sequence*))
   (funcall *u32-reader* *sequence* (offset obj)))
 
+(defun generic-s8-reader (obj)
+  (declare (special *sequence*))
+  (let ((val (elt *sequence* (offset obj))))
+    (if (logbitp 7 val)
+        (- val #x100)
+        val)))
+
+(defun generic-s16-reader (obj)
+  (declare (special *u16-reader* *sequence*))
+  (let ((val (funcall *u16-reader* *sequence* (offset obj))))
+    (if (logbitp 15 val)
+        (- val #x10000)
+        val)))
+
+(defun generic-s32-reader (obj)
+  (declare (special *u32-reader* *sequence*))
+  (let ((val (funcall *u32-reader* *sequence* (offset obj))))
+    (if (logbitp 31 val)
+        (- val #x100000000)
+        val)))
+
 (defparameter *primitive-types* (make-hash-table :test #'eq))
 
 (defun primitive-type-p (type)
@@ -216,6 +237,23 @@
 	  :width (/ width 8)))
   (defun cl-type (width)
     `(unsigned-byte ,width))
+  (defun quotation ()
+    '(nil)))
+
+(define-primitive-type signed-byte (width)
+  (defun apply-safe-parameter-types () '(integer))
+  (defun constant-width (width) (/ width 8))
+  (defun type-paramstack ())
+  (defun runtime-type-paramstack ())
+  (defun initargs (width)
+    (list 'btleaf
+	  :value-fn (case width
+		      (8 #'generic-s8-reader)
+		      (16 #'generic-s16-reader)
+		      (32 #'generic-s32-reader))
+	  :width (/ width 8)))
+  (defun cl-type (width)
+    `(signed-byte ,width))
   (defun quotation ()
     '(nil)))
 
