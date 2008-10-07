@@ -2,6 +2,8 @@
   (:use :common-lisp :alexandria :pergamum :iterate)
   (:export
    #:bintype #:define-primitive-type #:defbintype #:parse #:export-bintype
+   #:bintype-condition #:bintype-error #:bintype-parse-error #:bintype-spec-error #:bintype-simple-error
+   #:bintype-simple-parse-error #:bintype-simple-spec-error #:bintype-condition-bintype
    #:match #:plain #:indirect
    #:pure #:current-offset #:displaced-u8-vector #:zero-terminated-string #:zero-terminated-symbol #:funcstride-sequence
    #:set-endianness #:offset #:parent #:sub #:value #:path-value
@@ -103,8 +105,20 @@
   setter-map	;; the map for the producing elements
   toplevels)
 
+(define-condition bintype-condition (condition) ((bintype :accessor bintype-condition-bintype :initarg :bintype)))
+(define-condition bintype-error (bintype-condition error) ())
+(define-condition bintype-parse-error (bintype-error) ())
+(define-condition bintype-spec-error (bintype-error) ())
+(define-condition bintype-simple-error (bintype-error simple-error) ())
+(define-condition bintype-simple-parse-error (bintype-parse-error bintype-simple-error) ())
+(define-condition bintype-simple-spec-error (bintype-spec-error bintype-simple-error) ())
+
+(defmacro bterror ())
+
 (defun bintype (name)
-  (or (gethash name *bintypes*) (error "Unable to find the requested bintype ~S." name)))
+  (or (gethash name *bintypes*) (error 'bintype-simple-error
+                                 :format-control "Unable to find the requested bintype ~S."
+                                 :format-arguments (list name))))
 
 (defun bintype-toplevel (bintype name)
   (find name (bintype-toplevels bintype) :key (curry #'apply-toplevel-op 'name)))
@@ -119,7 +133,10 @@
   (:method ((btcontainer btstructured) (sel symbol))
     (if-let ((slot-number (slot-number (btstructured-bintype btcontainer) sel)))
 	    (aref (childs btcontainer) slot-number)
-	    (error "BTSTRUCTURED ~S has no field called ~S." btcontainer sel))))
+	    (error 'bintype-simple-spec-error
+             :bintype (btstructured-bintype btcontainer)
+             :format-control "BTSTRUCTURED ~S has no field called ~S."
+             :format-arguments (list btcontainer sel)))))
 
 (defgeneric (setf cref) (val container sel)
   (:documentation "Set a child of a BTCONTAINER.")
@@ -128,7 +145,10 @@
   (:method (val (btcontainer btstructured) (sel symbol))
     (if-let ((slot-number (slot-number (btstructured-bintype btcontainer) sel)))
 	    (setf (aref (childs btcontainer) slot-number) val)
-	    (error "BTSTRUCTURED ~S has no field called ~S." btcontainer sel))))
+	    (error 'bintype-simple-spec-error
+             :bintype (btstructured-bintype btcontainer)
+             :format-control "BTSTRUCTURED ~S has no field called ~S."
+             :cormat-arguments (list btcontainer sel)))))
 
 (defun generic-u8-reader (obj)
   (declare (special *sequence*))
@@ -211,7 +231,7 @@
   (defun quotation ()
     '(t nil)))
 
-(define-condition displacement-out-of-range (error)
+(define-condition displacement-out-of-range (bintype-parse-error)
   ((offset :accessor condition-offset :initarg :offset)
    (length :accessor condition-length :initarg :length)
    (misfit :accessor condition-misfit :initarg :misfit))
@@ -227,7 +247,9 @@
 (defun consume-displaced-u8-vector (dimension obj)
   (declare (special *sequence*))
   (unless (typep *sequence* '(vector (unsigned-byte 8)))
-    (error "underlying sequence type ~S is not subtype of (vector (unsigned-byte 8)), as required by displaced-u8-vector" (type-of *sequence*)))
+    (error 'bintype-simple-parse-error
+           :format-control "underlying sequence type ~S is not subtype of (vector (unsigned-byte 8)), as required by displaced-u8-vector"
+           :format-arguments (list (type-of *sequence*))))
   (let ((misfit (- (+ (offset obj) dimension) (array-dimension *sequence* 0))))
     (restart-case (when (plusp misfit)
                     (error 'displacement-out-of-range :length dimension :offset (offset obj) :misfit misfit))
@@ -305,12 +327,16 @@
   (defun runtime-type-paramstack (element-type) (runtime-typestack element-type))
   (defun initargs (dimension element-type stride stride-fn)
     (unless (primitive-type-p element-type)
-      (error "unknown sequence element type ~S." element-type))
+      (error 'bintype-simple-spec-error
+             :format-control "unknown sequence element type ~S."
+             :format-arguments (list element-type)))
     (let ((stride-fn (or stride-fn (when stride (constantly stride))
                          (when-let ((stride (and (typespec-types-match-p 'apply-safe-parameter-types element-type)
                                                  (apply-typespec 'constant-width element-type))))
                            (constantly stride))
-                         (error "stride is neither specified directly, nor via stride-fn, nor it is deducible from element type."))))
+                         (error 'bintype-simple-spec-error
+                                :format-control "stride is neither specified directly, nor via stride-fn, nor it is deducible from element type."
+                                :format-arguments nil))))
       (list 'btfuncstride
             :element-type element-type :dimension dimension :stride-fn stride-fn
             :width (iter (for i below dimension)
@@ -330,7 +356,9 @@
   (defun runtime-type-paramstack (element-type) (runtime-typestack element-type))
   (defun initargs (stream-size element-type)
     (unless (primitive-type-p element-type)
-      (error "unknown sequence element type ~S." element-type))
+      (error 'bintype-simple-spec-error
+             :format-control "unknown sequence element type ~S."
+             :format-arguments (list element-type)))
     (list 'btorderedpack :element-type element-type :width stream-size))
   (defun cl-type (element-type format)
     (ecase format
@@ -348,9 +376,11 @@
                     `(case ,dispatch-value
                        ,@(iter (for (signature type) in types)
                                (collect `(,signature ,@(generic-typestack type))))
-                       (t (error "no type for dispatch value ~S" ,dispatch-value)))))
+                       (t (error 'bintype-simple-parse-error
+                                 :format-control "no type for dispatch value ~S"
+                                 :format-arguments (list ,dispatch-value))))))
             t))
-  (defun runtime-type-paramstack () (error "Broken."))
+  (defun runtime-type-paramstack () (error 'bintype-simple-error :format-control "Broken." :format-arguments nil))
   (defun cl-type (types)
     `(or ,@(mapcar (compose (curry #'apply-typespec 'cl-type) #'second) types)))
   (defun quotation ()
@@ -361,7 +391,9 @@
 	 (cons 'quote
                (iter (for (signature type) in types)
                      (collect `(,signature (eval-typespec initargs ,type)))))
-	 (t (error "no type for dispatch value ~S" dispatch-value))))))
+	 (t (error 'bintype-simple-parse-error
+                   :format-control "no type for dispatch value ~S"
+                   :format-arguments (list dispatch-value)))))))
 
 (defun btstructured-constant-width (type-name)
   (let ((typespecs (mapcar (curry #'apply-toplevel-op 'typespec) (bintype-toplevels (bintype type-name)))))
@@ -472,11 +504,15 @@
   (if (every (compose #'case-able #'car) matchforms)
       `(case ,testform
 	 ,@matchforms
-	 (t (error "Value ~S didn't match any of ~S." ,testform ',matchforms)))
+	 (t (error 'bintype-simple-parse-error
+                   :format-control "Value ~S didn't match any of ~S."
+                   :format-arguments (list ,testform ',matchforms))))
       (once-only (testform)
 	`(cond ,@(iter (for (testval . forms) in matchforms)
 		       (collect `((null (mismatch ,testform ',testval)) ,@(or forms (list nil)))))
-	       (t (error "Value ~S didn't match any of ~S." ,testform ',(mapcar #'car matchforms)))))))
+	       (t (error 'bintype-simple-parse-error
+                         :format-control "Value ~S didn't match any of ~S."
+                         :format-arguments (list ,testform ',(mapcar #'car matchforms))))))))
 
 (define-function-evaluations toplevel-op match (name typespec values &key ignore out-of-stream-offset)
   (name (name)					name)
@@ -542,11 +578,13 @@
 				(eq type-name (bintype-name (btstructured-bintype current))))
 			   current)
 			  ((not (slot-boundp current 'parent))
-			   (error "no parent of type ~S for ~S" type-name base))
+			   (error 'bintype-simple-spec-error
+                                  :format-control "no parent of type ~S for ~S"
+                                  :format-arguments (list type-name base)))
 			  (t
 			   (iterate (parent current))))))
     (unless (slot-boundp base 'parent)
-      (error "no parent of type ~S for ~S" type-name base))
+      (error 'bintype-simple-spec-error :format-control "no parent of type ~S for ~S" :format-arguments (list type-name base)))
     (iterate (parent base))))
 
 (defun path-value (current &rest designators)
