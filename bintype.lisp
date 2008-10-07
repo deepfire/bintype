@@ -4,7 +4,7 @@
    #:bintype #:define-primitive-type #:defbintype #:parse #:export-bintype
    #:bintype-condition #:bintype-error #:bintype-parse-error #:bintype-spec-error #:bintype-simple-error
    #:bintype-simple-parse-error #:bintype-simple-spec-error #:bintype-condition-bintype
-   #:match #:plain #:indirect
+   #:flag #:match #:plain #:indirect
    #:pure #:current-offset #:displaced-u8-vector #:zero-terminated-string #:zero-terminated-symbol #:funcstride-sequence
    #:set-endianness #:offset #:parent #:sub #:value #:path-value
    #:*self* #:*direct-value* #:displacement-out-of-range #:trim))
@@ -14,7 +14,7 @@
 (defvar *bintypes* (make-hash-table))
 
 (defclass btobj ()
-  ((offset :accessor offset :initarg :offset)
+  ((offset :accessor offset :initarg :offset :documentation "offset in bits from stream begin")
    (parent :accessor parent :initarg :parent)
    (params :accessor params :initarg :params)
    (typespec :accessor typespec :initarg :typespec)
@@ -101,7 +101,7 @@
   lambda-list
   instantiator
   paver
-  slot-map	;; the first (length producing-toplevels) elements are the producing ones
+  slot-map	;; the first (length producing-toplevels) elements are the producing ones (plus, btbitfields...)
   setter-map	;; the map for the producing elements
   toplevels)
 
@@ -150,35 +150,39 @@
              :format-control "BTSTRUCTURED ~S has no field called ~S."
              :cormat-arguments (list btcontainer sel)))))
 
+(defun read-bits (obj width &aux (offset (offset obj)) (bytespan (1+ (ash (+ width (logand offset #x7)) -3))))
+  (declare (special *u-reader* *sequence*))
+  (ldb (byte width (logand offset #x7)) (funcall *u-reader* *sequence* (ash offset -3) bytespan)))
+
 (defun generic-u8-reader (obj)
   (declare (special *sequence*))
-  (elt *sequence* (offset obj)))
+  (elt *sequence* (ash (offset obj) -3)))
 
 (defun generic-u16-reader (obj)
   (declare (special *u16-reader* *sequence*))
-  (funcall *u16-reader* *sequence* (offset obj)))
+  (funcall *u16-reader* *sequence* (ash (offset obj) -3)))
 
 (defun generic-u32-reader (obj)
   (declare (special *u32-reader* *sequence*))
-  (funcall *u32-reader* *sequence* (offset obj)))
+  (funcall *u32-reader* *sequence* (ash (offset obj) -3)))
 
 (defun generic-s8-reader (obj)
   (declare (special *sequence*))
-  (let ((val (elt *sequence* (offset obj))))
+  (let ((val (elt *sequence* (ash (offset obj) -3))))
     (if (logbitp 7 val)
         (- val #x100)
         val)))
 
 (defun generic-s16-reader (obj)
   (declare (special *u16-reader* *sequence*))
-  (let ((val (funcall *u16-reader* *sequence* (offset obj))))
+  (let ((val (funcall *u16-reader* *sequence* (ash (offset obj) -3))))
     (if (logbitp 15 val)
         (- val #x10000)
         val)))
 
 (defun generic-s32-reader (obj)
   (declare (special *u32-reader* *sequence*))
-  (let ((val (funcall *u32-reader* *sequence* (offset obj))))
+  (let ((val (funcall *u32-reader* *sequence* (ash (offset obj) -3))))
     (if (logbitp 31 val)
         (- val #x100000000)
         val)))
@@ -225,33 +229,34 @@
 
 (define-primitive-type unsigned-byte (width)
   (defun apply-safe-parameter-types () '((integer 0)))
-  (defun constant-width (width) (/ width 8))
+  (defun constant-width (width) width)
   (defun type-paramstack ())
   (defun runtime-type-paramstack ())
   (defun initargs (width)
     (list 'btleaf
-	  :value-fn (case width
-		      (8 #'generic-u8-reader)
-		      (16 #'generic-u16-reader)
-		      (32 #'generic-u32-reader))
-	  :width (/ width 8)))
-  (defun cl-type (width)
-    `(unsigned-byte ,width))
-  (defun quotation ()
-    '(nil)))
+     :value-fn (case width
+                 (8 #'generic-u8-reader)
+                 (16 #'generic-u16-reader)
+                 (32 #'generic-u32-reader)
+                 (t (lambda (obj) (read-bits obj width))))
+     :width width))
+  (defun cl-type (width) `(unsigned-byte ,width))
+  (defun quotation () '(nil)))
 
 (define-primitive-type signed-byte (width)
   (defun apply-safe-parameter-types () '(integer))
-  (defun constant-width (width) (/ width 8))
+  (defun constant-width (width) width)
   (defun type-paramstack ())
   (defun runtime-type-paramstack ())
   (defun initargs (width)
     (list 'btleaf
-	  :value-fn (case width
-		      (8 #'generic-s8-reader)
-		      (16 #'generic-s16-reader)
-		      (32 #'generic-s32-reader))
-	  :width (/ width 8)))
+     :value-fn (case width
+                 (8 #'generic-s8-reader)
+                 (16 #'generic-s16-reader)
+                 (32 #'generic-s32-reader)
+                 (t (lambda (obj &aux (val (read-bits obj width)))
+                      (if (logbitp (1- width) val) (- val (ash 1 width)) val))))
+     :width width))
   (defun cl-type (width)
     `(signed-byte ,width))
   (defun quotation ()
@@ -275,7 +280,7 @@
    (misfit :accessor condition-misfit :initarg :misfit))
   (:report
    (lambda (cond stream)
-     (format stream "~@<displaced vector of length ~S at offset ~S doesn't fit the underlying sequence by ~S elements~:@>"
+     (format stream "~@<displaced vector of length ~S at byte offset ~S doesn't fit the underlying sequence by ~S elements~:@>"
              (condition-length cond) (condition-offset cond) (- (condition-length cond) (condition-misfit cond))))))
 
 (defun stream-format (format-string &rest rest)
@@ -288,22 +293,22 @@
     (error 'bintype-simple-parse-error
            :format-control "underlying sequence type ~S is not subtype of (vector (unsigned-byte 8)), as required by displaced-u8-vector"
            :format-arguments (list (type-of *sequence*))))
-  (let ((misfit (- (+ (offset obj) dimension) (array-dimension *sequence* 0))))
+  (let ((misfit (- (+ (ash (offset obj) -3) dimension) (array-dimension *sequence* 0))))
     (restart-case (when (plusp misfit)
-                    (error 'displacement-out-of-range :length dimension :offset (offset obj) :misfit misfit))
+                    (error 'displacement-out-of-range :length dimension :offset (ash (offset obj) -3) :misfit misfit))
       (trim (cond)
        :report "Trim the displaced vector to fit."
        (declare (ignore cond))
        (decf dimension misfit))))
-  (make-array dimension :element-type '(unsigned-byte 8) :displaced-to *sequence* :displaced-index-offset (offset obj)))
+  (make-array dimension :element-type '(unsigned-byte 8) :displaced-to *sequence* :displaced-index-offset (ash (offset obj) -3)))
 
 (define-primitive-type displaced-u8-vector (length)
   (defun apply-safe-parameter-types () '((integer 0)))
-  (defun constant-width (length) length)
+  (defun constant-width (length) (ash length 3))
   (defun type-paramstack ())
   (defun runtime-type-paramstack ())
   (defun initargs (length)
-    (list 'btleaf :value-fn (curry #'consume-displaced-u8-vector length) :width length))
+    (list 'btleaf :value-fn (curry #'consume-displaced-u8-vector length) :width (ash length 3)))
   (defun cl-type ()
     `(vector (unsigned-byte 8)))
   (defun quotation ()
@@ -315,26 +320,26 @@
   (defun type-paramstack ())
   (defun runtime-type-paramstack ())
   (defun initargs ()
-    (list 'btleaf :value-fn #'offset :width 0))
+    (list 'btleaf :value-fn #'(lambda (obj) (ash (offset obj) -3)) :width 0))
   (defun cl-type (width)
     `(unsigned-byte ,width))
   (defun quotation ()
     '(nil)))
 
-(defun consume-zero-terminated-string (dimension obj)
+(defun consume-zero-terminated-string (dimension obj &aux (offset (ash (offset obj) -3)))
   (declare (special *sequence*))
-  (let ((search-stop (min (+ (offset obj) dimension) (length *sequence*))))
-    (coerce (iter (for i from (offset obj) below (or (position 0 *sequence* :start (offset obj) :end search-stop) search-stop))
+  (let ((search-stop (min (+ offset dimension) (length *sequence*))))
+    (coerce (iter (for i from offset below (or (position 0 *sequence* :start offset :end search-stop) search-stop))
 		  (collect (code-char (elt *sequence* i))))
 	    'string)))
   
 (define-primitive-type zero-terminated-string (dimension)
   (defun apply-safe-parameter-types () '((integer 0)))
-  (defun constant-width (dimension) dimension)
+  (defun constant-width (dimension) (ash dimension 3))
   (defun type-paramstack ())
   (defun runtime-type-paramstack ())
   (defun initargs (dimension)
-    (list 'btleaf :value-fn (curry #'consume-zero-terminated-string dimension) :width dimension))
+    (list 'btleaf :value-fn (curry #'consume-zero-terminated-string dimension) :width (ash dimension 3)))
   (defun cl-type ()
     'string)
   (defun quotation ()
@@ -342,12 +347,12 @@
 
 (define-primitive-type zero-terminated-symbol (dimension &optional (package :keyword))
   (defun apply-safe-parameter-types () '((integer 0) &optional t))
-  (defun constant-width (dimension) dimension)
+  (defun constant-width (dimension) (ash dimension 3))
   (defun type-paramstack ())
   (defun runtime-type-paramstack ())
   (defun initargs (dimension package)
     (list 'btleaf :value-fn (compose (the function (rcurry #'intern package)) #'string-upcase (the function (curry #'consume-zero-terminated-string dimension)))
-                  :width dimension))
+                  :width (ash dimension 3)))
   (defun cl-type (package)
     (if (eq package :keyword) 'keyword 'symbol))
   (defun quotation ()
@@ -360,7 +365,7 @@
                                      (or stride
                                          (and (typespec-types-match-p 'apply-safe-parameter-types element-type)
                                               (apply-typespec 'constant-width element-type))))))
-      (* constant-stride dimension)))
+      (* constant-stride dimension 8)))
   (defun type-paramstack (element-type) (generic-typestack element-type))
   (defun runtime-type-paramstack (element-type) (runtime-typestack element-type))
   (defun initargs (dimension element-type stride stride-fn)
@@ -389,7 +394,7 @@
 
 (define-primitive-type orderedpack (stream-size &key element-type (format :list))
   (defun apply-safe-parameter-types () '((integer 0) &key (element-type t) (format t)))
-  (defun constant-width (stream-size) stream-size)
+  (defun constant-width (stream-size) (ash stream-size 3))
   (defun type-paramstack (element-type) (generic-typestack element-type))
   (defun runtime-type-paramstack (element-type) (runtime-typestack element-type))
   (defun initargs (stream-size element-type)
@@ -397,7 +402,7 @@
       (error 'bintype-simple-spec-error
              :format-control "unknown sequence element type ~S."
              :format-arguments (list element-type)))
-    (list 'btorderedpack :element-type element-type :width stream-size))
+    (list 'btorderedpack :element-type element-type :width (ash stream-size 3)))
   (defun cl-type (element-type format)
     (ecase format
       (:list 'list)
@@ -535,6 +540,18 @@
   (immediate-eval ()				nil)
   (initial-to-final-xform ()			'#'values))
 
+(define-function-evaluations toplevel-op flag (name &key out-of-stream-offset)
+  (name (name)					name)
+  (typespec ()			        	'(unsigned-byte 1))
+  (cl-type-for-field ()			        'boolean)
+  (emits-field-p ()			        t)
+  (out-of-stream-offset (out-of-stream-offset)	out-of-stream-offset)
+  (quotation ()					'(t &rest (out-of-stream-offset null)))
+  (no-oos ()					'(t &key (out-of-stream-offset null)))
+  (immediate-eval ()				nil)
+  (initial-to-final-xform ()			(emit-lambda '(val obj) (list (list 'plusp 'val))
+							     :declarations (emit-declarations :ignore '(obj)))))
+
 (defun case-able (obj)
   (typep obj '(or number symbol)))
 
@@ -637,16 +654,16 @@
 			   (iterate (sub current (first designators)) (rest designators))))))
     (iterate current designators)))
 
-(defun parse (typespec *sequence* &key (endianness :little-endian) (offset 0) (error-p t) &aux *u16-reader* *u32-reader*)
+(defun parse (typespec *sequence* &key (endianness :little-endian) (offset 0) (error-p t) &aux *u-reader* *u16-reader* *u32-reader*)
   "Parse *SEQUENCE* according to the TYPESPEC, ENDIANNESS and OFFSET, returning parsed structure. 
    ERROR-P controls whether parse errors result in conditions of BINTYPE-PARSE-ERROR subtype being signalled.
    Note that errors of BINTYPE-SPEC-ERROR subtype are signalled regardless of ERROR-P."
-  (declare (special *u16-reader* *u32-reader* *sequence*))
+  (declare (special *u-reader* *u16-reader* *u32-reader* *sequence*))
   (let ((*endianness-setter* (lambda (val)
-			       (setf (values *u16-reader* *u32-reader*)
+			       (setf (values *u-reader* *u16-reader* *u32-reader*)
 				     (ecase val
-				       (:little-endian (values #'u8-seq-word16le #'u8-seq-word32le))
-				       (:big-endian (values #'u8-seq-word16be #'u8-seq-word32be)))))))
+				       (:little-endian (values #'u8-seq-wordle #'u8-seq-word16le #'u8-seq-word32le))
+				       (:big-endian (values #'u8-seq-wordbe #'u8-seq-word16be #'u8-seq-word32be)))))))
     (declare (special *endianness-setter*))
     (funcall *endianness-setter* endianness)
     (op-parameter-destructurer (op params) typespec
@@ -654,7 +671,7 @@
       (handler-case 
           (let* ((paramstack (runtime-typestack typespec))
                  (initargs (apply-typespec 'initargs (cons op (first paramstack))))
-                 (obj (apply #'make-instance (first initargs) :offset offset :typespec typespec :params paramstack (rest initargs))))
+                 (obj (apply #'make-instance (first initargs) :offset (ash offset 3) :typespec typespec :params paramstack (rest initargs))))
             (pave obj)
             (fill-value obj))
         (bintype-parse-error (c) (when error-p (error c)))))))
