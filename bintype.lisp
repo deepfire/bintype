@@ -599,7 +599,10 @@
 			   (iterate (sub current (first designators)) (rest designators))))))
     (iterate current designators)))
 
-(defun parse (typespec *sequence* &optional (endianness :little-endian) (offset 0) &aux *u16-reader* *u32-reader*)
+(defun parse (typespec *sequence* &key (endianness :little-endian) (offset 0) (error-p t) &aux *u16-reader* *u32-reader*)
+  "Parse *SEQUENCE* according to the TYPESPEC, ENDIANNESS and OFFSET, returning parsed structure. 
+   ERROR-P controls whether parse errors result in conditions of BINTYPE-PARSE-ERROR subtype being signalled.
+   Note that errors of BINTYPE-SPEC-ERROR subtype are signalled regardless of ERROR-P."
   (declare (special *u16-reader* *u32-reader* *sequence*))
   (let ((*endianness-setter* (lambda (val)
 			       (setf (values *u16-reader* *u32-reader*)
@@ -610,11 +613,13 @@
     (funcall *endianness-setter* endianness)
     (op-parameter-destructurer (op params) typespec
       (declare (ignore params))
-      (let* ((paramstack (runtime-typestack typespec))
-             (initargs (apply-typespec 'initargs (cons op (first paramstack))))
-             (obj (apply #'make-instance (first initargs) :offset offset :typespec typespec :params paramstack (rest initargs))))
-        (pave obj)
-        (fill-value obj)))))
+      (handler-case 
+          (let* ((paramstack (runtime-typestack typespec))
+                 (initargs (apply-typespec 'initargs (cons op (first paramstack))))
+                 (obj (apply #'make-instance (first initargs) :offset offset :typespec typespec :params paramstack (rest initargs))))
+            (pave obj)
+            (fill-value obj))
+        (bintype-parse-error (c) (when error-p (error c)))))))
 
 (defun generic-slot-accessor-name (type-name slot-name)
   (format-symbol (symbol-package type-name) "~A-~A" type-name slot-name))
