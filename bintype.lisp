@@ -190,8 +190,7 @@
 (defparameter *primitive-types* (make-hash-table :test #'eq))
 
 (defun primitive-type-p (type)
-  (op-parameter-destructurer (op params) type
-    (declare (ignore params))
+  (op-parameter-destructurer (op nil) type
     (gethash op *primitive-types*)))
 
 (defmacro define-primitive-type (name lambda-list &body body)
@@ -209,22 +208,19 @@
 (define-evaluation-domain typespec)
 
 (defun typespec-types-match-p (typeset typespec)
-  (op-parameter-destructurer (op params) typespec
-    (declare (ignore op))
+  (op-parameter-destructurer (nil params) typespec
     (lambda-list-application-types-match-p (apply-typespec typeset typespec) params)))
 
 ;; Note: the only user of 'custom processing' is the non-working typecase.
 (defun generic-typestack (typespec)
-  (op-parameter-destructurer (op params) typespec
-    (declare (ignore op))
+  (op-parameter-destructurer (nil params) typespec
     (multiple-value-bind (rest-of-typestack custom-processing) (apply-typespec 'type-paramstack typespec)
       (if custom-processing
           rest-of-typestack
           (cons (when params `(list ,@(map-lambda-list #'quote-when (apply-typespec 'quotation typespec) params))) rest-of-typestack)))))
 
 (defun runtime-typestack (typespec)
-  (op-parameter-destructurer (op params) typespec
-    (declare (ignore op))
+  (op-parameter-destructurer (nil params) typespec
     (cons params (apply-typespec 'runtime-type-paramstack typespec))))
 
 (define-primitive-type unsigned-byte (width)
@@ -476,8 +472,7 @@
   (:method ((obj btfuncstride))
     (flet ((pave-btfuncstride (obj dimension &key element-type stride stride-fn (format :list))
              (declare (ignore stride stride-fn format))
-             (op-parameter-destructurer (op params) element-type
-               (declare (ignore params))
+             (op-parameter-destructurer (op nil) element-type
                (let ((initargs (apply-typespec 'initargs (cons op (second (params obj))))))
                  (iter (for i below dimension)
                        (for offset initially (offset obj) then (+ offset (funcall (btfuncstride-stride-fn obj) i)))
@@ -491,8 +486,7 @@
 (define-evaluation-domain toplevel-op)
 
 (defun toplevel-types-match-p (typeset toplevel)
-  (op-parameter-destructurer (op params) toplevel
-    (declare (ignore op))
+  (op-parameter-destructurer (nil params) toplevel
     (lambda-list-application-types-match-p (apply-toplevel-op typeset toplevel) params)))
 
 (defun process-field (obj immediate-p stream-offset out-of-stream-offset)
@@ -666,8 +660,7 @@
 				       (:big-endian (values #'u8-seq-wordbe #'u8-seq-word16be #'u8-seq-word32be)))))))
     (declare (special *endianness-setter*))
     (funcall *endianness-setter* endianness)
-    (op-parameter-destructurer (op params) typespec
-      (declare (ignore params))
+    (op-parameter-destructurer (op nil) typespec
       (handler-case 
           (let* ((paramstack (runtime-typestack typespec))
                  (initargs (apply-typespec 'initargs (cons op (first paramstack))))
