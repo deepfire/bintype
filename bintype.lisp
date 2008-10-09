@@ -648,17 +648,18 @@
 			   (iterate (sub current (first designators)) (rest designators))))))
     (iterate current designators)))
 
-(defun parse (typespec *sequence* &key (endianness :little-endian) (offset 0) (error-p t) &aux *u-reader* *u16-reader* *u32-reader*)
+(defun parse (typespec sequence &key (endianness :little-endian) (offset 0) (error-p t) &aux *u-reader* *u16-reader* *u32-reader*)
   "Parse *SEQUENCE* according to the TYPESPEC, ENDIANNESS and OFFSET, returning parsed structure. 
    ERROR-P controls whether parse errors result in conditions of BINTYPE-PARSE-ERROR subtype being signalled.
    Note that errors of BINTYPE-SPEC-ERROR subtype are signalled regardless of ERROR-P."
-  (declare (special *u-reader* *u16-reader* *u32-reader* *sequence*))
-  (let ((*endianness-setter* (lambda (val)
+  (declare (special *u-reader* *u16-reader* *u32-reader*))
+  (let ((*sequence* (coerce-to-sequence sequence))
+        (*endianness-setter* (lambda (val)
 			       (setf (values *u-reader* *u16-reader* *u32-reader*)
 				     (ecase val
 				       (:little-endian (values #'u8-seq-wordle #'u8-seq-word16le #'u8-seq-word32le))
 				       (:big-endian (values #'u8-seq-wordbe #'u8-seq-word16be #'u8-seq-word32be)))))))
-    (declare (special *endianness-setter*))
+    (declare (special *sequence* *endianness-setter*))
     (funcall *endianness-setter* endianness)
     (op-parameter-destructurer (op nil) typespec
       (handler-case 
