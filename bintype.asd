@@ -1,3 +1,5 @@
+;;; -*- Mode: Lisp -*-
+
 (defpackage :bintype.system
   (:use :cl :asdf))
 
