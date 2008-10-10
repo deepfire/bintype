@@ -228,13 +228,10 @@
        (warn "redefining ~S in DEFINE-PRIMITIVE-TYPE" ',name))
      (setf (gethash ',name *primitive-types*) t)
      ,@(when-let ((functions (remove 'defun body :key #'car :test-not #'eq)))
-                 `((define-function-evaluations typespec ,name ,lambda-list
-                                                ,@(mapcar #'rest functions))))
-     ,@(when-let ((macros (remove 'defmacro body :key #'car :test-not #'eq)))
-                 `((define-macro-evaluations typespec ,name ,lambda-list
-                                             ,@(mapcar #'rest macros))))))
+                 `((define-lambda-map typespec ,name ,lambda-list
+                     ,@(mapcar #'rest functions))))))
 
-(define-evaluation-domain typespec)
+(define-lambda-mapper typespec)
 
 (defun typespec-types-match-p (typeset typespec)
   (op-parameter-destructurer (nil params) typespec
@@ -246,7 +243,7 @@
     (multiple-value-bind (rest-of-typestack custom-processing) (apply-typespec 'type-paramstack typespec)
       (if custom-processing
           rest-of-typestack
-          (cons (when params `(list ,@(map-lambda-list #'quote-when (apply-typespec 'quotation typespec) params))) rest-of-typestack)))))
+          (cons (when params `(list ,@(map-lambda-list #'quote-when (apply-typespec 'quotation typespec) params :insert-keywords t))) rest-of-typestack)))))
 
 (defun runtime-typestack (typespec)
   (op-parameter-destructurer (nil params) typespec
@@ -512,7 +509,7 @@
           (apply #'pave-btfuncstride obj (first (params obj)))
         (call-next-method)))))
 
-(define-evaluation-domain toplevel-op)
+(define-lambda-mapper toplevel-op)
 
 (defun toplevel-types-match-p (typeset toplevel)
   (op-parameter-destructurer (nil params) toplevel
@@ -531,7 +528,7 @@
   (let ((name (apply-toplevel-op 'name toplevel))
         (no-oos (null (cadr (member :out-of-stream-offset toplevel))))
         (typespec (apply-toplevel-op 'typespec toplevel))
-        (quoted-toplevel (map-lambda-list #'quote-when (cons t (apply-toplevel-op 'quotation toplevel)) toplevel)))
+        (quoted-toplevel (map-lambda-list #'quote-when (cons t (apply-toplevel-op 'quotation toplevel)) toplevel :insert-keywords t)))
     (with-gensyms (start-offset o-o-s-offset paramstack initargs field-obj)
       (with-named-lambda-emission ((format-symbol nil "~A-~A-PAVEMENT" bintype-name name) (list start-offset)
                                    :declarations (emit-declarations :special '(*self*)))
@@ -552,7 +549,7 @@
                                :declarations (emit-declarations :special '(*sequence*)))
     `(compose ,@(mapcar (curry #'emit-toplevel-pavement name) (reverse toplevels)))))
 
-(define-function-evaluations toplevel-op value (name typespec &key ignore out-of-stream-offset)
+(define-lambda-map toplevel-op value (name typespec &key ignore out-of-stream-offset)
   (name (name)					name)
   (typespec (typespec)				typespec)
   (cl-type-for-field (typespec)			`(or null ,(apply-typespec 'cl-type typespec)))
@@ -562,7 +559,7 @@
   (immediate-eval ()				nil)
   (initial-to-final-xform ()			'#'values))
 
-(define-function-evaluations toplevel-op flag (name &key out-of-stream-offset)
+(define-lambda-map toplevel-op flag (name &key out-of-stream-offset)
   (name (name)					name)
   (typespec ()			        	'(unsigned-byte 1))
   (cl-type-for-field ()			        'boolean)
@@ -590,7 +587,7 @@
                          :format-control "Value ~S didn't match any of ~S."
                          :format-arguments (list ,testform ',(mapcar #'car matchforms))))))))
 
-(define-function-evaluations toplevel-op match (name typespec values &key ignore out-of-stream-offset)
+(define-lambda-map toplevel-op match (name typespec values &key ignore out-of-stream-offset)
   (name (name)					name)
   (typespec (typespec)				typespec)
   (cl-type-for-field ()				t) ;; try to calculate the most specific common type of values
@@ -601,7 +598,7 @@
   (initial-to-final-xform (values) 		(emit-lambda '(val obj) (list (emit-match-cond/case 'val values))
 							     :declarations (emit-declarations :ignore '(obj)))))
 
-(define-function-evaluations toplevel-op indirect (direct-typespec result-toplevel &key ignore out-of-stream-offset final-value)
+(define-lambda-map toplevel-op indirect (direct-typespec result-toplevel &key ignore out-of-stream-offset final-value)
   (name (result-toplevel)			(apply-toplevel-op 'name result-toplevel))
   (typespec (direct-typespec result-toplevel final-value)
 	    					(if final-value
