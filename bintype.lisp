@@ -193,6 +193,35 @@
   (op-parameter-destructurer (op nil) type
     (gethash op *primitive-types*)))
 
+(defmacro define-lambda-mapper (domain)
+  (let* ((package (symbol-package domain))
+         (lambda-table (format-symbol package "*~A-LAMBDA-LISTS*" domain)))
+    `(progn
+       (eval-when (:compile-toplevel :load-toplevel)
+	 (defparameter ,lambda-table (make-hash-table :test #'eq)))
+       (defun ,(format-symbol package "~A-LAMBDA-LIST" domain) (set-name)
+         (gethash set-name ,lambda-table))
+       (defun ,(format-symbol package "APPLY-~A" domain) (query-name form)
+         (op-parameter-destructurer (set-name params) form
+           (apply (format-symbol (find-package ',(package-name package)) "~A-~A-~A" ',domain set-name query-name)
+                  params))))))
+
+(defmacro define-lambda-map (domain name lambda-list &body definitions)
+  (let* ((package (symbol-package domain))
+         (lambda-table (format-symbol package "*~A-LAMBDA-LISTS*" domain))
+         (lambda-binds (lambda-list-binds lambda-list)))
+    (unless (boundp lambda-table)
+      (error "~@<undefined lambda mapper ~S~@:>" domain))
+    `(eval-when (:compile-toplevel :load-toplevel :execute)
+       (setf (gethash ',name ,lambda-table) ',lambda-list)
+       ,@(iter (for (query-name interested-by-list . body) in definitions)
+               (unless (every (rcurry #'member lambda-binds) interested-by-list)
+                 (error "~@<the interested-by binding specification ~S is not a subset of the main binding list ~S~@:>"
+                        interested-by-list lambda-list))
+               (collect
+                (emit-defun (format-symbol package "~A-~A-~A" domain name query-name) lambda-list body
+                 :declarations (emit-declarations :ignore (set-difference lambda-binds interested-by-list))))))))
+
 (defmacro define-primitive-type (name lambda-list &body body)
   `(progn
      (when (primitive-type-p ',name)
