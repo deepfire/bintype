@@ -113,15 +113,16 @@
 (define-condition bintype-simple-parse-error (bintype-parse-error bintype-simple-error) ())
 (define-condition bintype-simple-spec-error (bintype-spec-error bintype-simple-error) ())
 
-(defmacro bterror ())
-
 (defun bintype (name)
   (or (gethash name *bintypes*) (error 'bintype-simple-error
                                  :format-control "Unable to find the requested bintype ~S."
                                  :format-arguments (list name))))
 
+(defun toplevel-lambda-var (toplevel var)
+  (lambda-list-1 (toplevel-op-lambda-list (car toplevel)) (rest toplevel) var))
+
 (defun bintype-toplevel (bintype name)
-  (find name (bintype-toplevels bintype) :key (curry #'apply-toplevel-op 'name)))
+  (find name (bintype-toplevels bintype) :key (rcurry #'toplevel-lambda-var 'name)))
 
 (defun slot-number (bintype slot-name)
   (position slot-name (bintype-slot-map bintype) :test #'eq))
@@ -244,7 +245,7 @@
 
 ;; Note: the only user of 'custom processing' is the non-working typecase.
 (defun generic-typestack (typespec)
-  (op-parameter-destructurer (ty params) typespec
+  (op-parameter-destructurer (nil params) typespec
     (multiple-value-bind (rest-of-typestack custom-processing) (apply-typespec 'type-paramstack typespec)
       (if custom-processing
           rest-of-typestack
@@ -530,21 +531,19 @@
 
 ;; circularity: emit-toplevel-pavement -> toplevel-op indirect -> e-t-p.
 (defun emit-toplevel-pavement (bintype-name toplevel)
-  (let ((name (apply-toplevel-op 'name toplevel))
-        (no-oos (null (cadr (member :out-of-stream-offset toplevel))))
-        (typespec (apply-toplevel-op 'typespec toplevel))
-        (quoted-toplevel (custom-map-lambda-list #'quote-when (cons t (apply-toplevel-op 'quotation toplevel)) toplevel :insert-keywords t)))
+  (let ((name (toplevel-lambda-var toplevel 'name))
+        (oos (toplevel-lambda-var toplevel 'out-of-stream-offset))
+        (typespec (apply-toplevel-op 'typespec toplevel)))
     (with-gensyms (start-offset o-o-s-offset paramstack initargs field-obj)
       (with-named-lambda-emission ((format-symbol nil "~A-~A-PAVEMENT" bintype-name name) (list start-offset)
                                    :declarations (emit-declarations :special '(*self*)))
-        `(let* (,@(unless no-oos `((,o-o-s-offset (apply-toplevel-op 'out-of-stream-offset (list ,@quoted-toplevel)))))
-                (,paramstack (list ,@(generic-typestack typespec)))
+        `(let* (,@(when oos `((,o-o-s-offset ,oos))) (,paramstack (list ,@(generic-typestack typespec)))
                 (,initargs (apply-typespec 'initargs (cons ',(first typespec) (first ,paramstack))))
-                (,field-obj (apply #'make-instance (first ,initargs) :offset ,(if no-oos start-offset `(or ,o-o-s-offset ,start-offset)) :parent *self* :sub-id ',name
+                (,field-obj (apply #'make-instance (first ,initargs) :offset ,(if oos `(or ,o-o-s-offset ,start-offset) start-offset) :parent *self* :sub-id ',name
                                                                      :typespec ',typespec :params ,paramstack
                                                                      ,@(when-let ((i-t-f-f (apply-toplevel-op 'initial-to-final-xform toplevel)))
                                                                                  `(:initial-to-final-fn ,i-t-f-f)) (rest ,initargs))))
-           (process-field ,field-obj ,(apply-toplevel-op 'immediate-eval toplevel) ,start-offset ,(unless no-oos o-o-s-offset)))))))
+           (process-field ,field-obj ,(apply-toplevel-op 'immediate-eval toplevel) ,start-offset ,(when oos o-o-s-offset)))))))
 
 (defun set-endianness (val)
   (declare (type (member :little-endian :big-endian) val) (special *endianness-setter*))
@@ -556,22 +555,16 @@
     `(compose ,@(mapcar (curry #'emit-toplevel-pavement name) (reverse toplevels)))))
 
 (define-lambda-map toplevel-op value (name typespec &key ignore out-of-stream-offset)
-  (name (name)					name)
   (typespec (typespec)				typespec)
   (cl-type-for-field (typespec)			`(or null ,(apply-typespec 'cl-type typespec)))
-  (emits-field-p (ignore)			(null ignore))
-  (out-of-stream-offset (out-of-stream-offset)	out-of-stream-offset)
   (quotation ()					'(t t &rest nil))
   (immediate-eval ()				nil)
   (initial-to-final-xform ()			'#'values))
 
-(define-lambda-map toplevel-op flag (name &key out-of-stream-offset)
-  (name (name)					name)
+(define-lambda-map toplevel-op flag (name &key ignore out-of-stream-offset)
   (typespec ()			        	'(unsigned-byte 1))
   (cl-type-for-field ()			        'boolean)
-  (emits-field-p ()			        t)
-  (out-of-stream-offset (out-of-stream-offset)	out-of-stream-offset)
-  (quotation ()					'(t &rest (out-of-stream-offset null)))
+  (quotation ()					'(t &rest nil))
   (immediate-eval ()				nil)
   (initial-to-final-xform ()			(emit-lambda '(val obj) (list (list 'plusp 'val))
 							     :declarations (emit-declarations :ignore '(obj)))))
@@ -594,26 +587,20 @@
                          :format-arguments (list ,testform ',(mapcar #'car matchforms))))))))
 
 (define-lambda-map toplevel-op match (name typespec values &key ignore out-of-stream-offset)
-  (name (name)					name)
   (typespec (typespec)				typespec)
   (cl-type-for-field ()				t) ;; try to calculate the most specific common type of values
-  (emits-field-p (ignore)			(null ignore))
-  (out-of-stream-offset (out-of-stream-offset)	out-of-stream-offset)
   (quotation ()					'(t t t &rest nil))
   (immediate-eval (values)			t)
   (initial-to-final-xform (values) 		(emit-lambda '(val obj) (list (emit-match-cond/case 'val values))
 							     :declarations (emit-declarations :ignore '(obj)))))
 
-(define-lambda-map toplevel-op indirect (direct-typespec result-toplevel &key ignore out-of-stream-offset final-value)
-  (name (result-toplevel)			(apply-toplevel-op 'name result-toplevel))
+(define-lambda-map toplevel-op indirect (name direct-typespec result-toplevel &key ignore out-of-stream-offset final-value)
   (typespec (direct-typespec result-toplevel final-value)
 	    					(if final-value
 						    (apply-toplevel-op 'typespec result-toplevel)
 						    direct-typespec))
   (cl-type-for-field (result-toplevel)		(apply-toplevel-op 'cl-type-for-field result-toplevel))
-  (emits-field-p (ignore)			(null ignore))
-  (out-of-stream-offset (out-of-stream-offset)	out-of-stream-offset)
-  (quotation ()					'(t t &rest nil))
+  (quotation ()					'(t t t &rest nil))
   (immediate-eval (result-toplevel)		(apply-toplevel-op 'immediate-eval result-toplevel))
   (initial-to-final-xform (result-toplevel)     `(compose ,(apply-toplevel-op 'initial-to-final-xform result-toplevel)
                                                           ,(emit-lambda `(*direct-value* obj &aux (*self* (parent obj)))
@@ -702,20 +689,19 @@
   (format-symbol (symbol-package type-name) "~A-~A" type-name slot-name))
 
 (defmacro defbintype (type-name lambda-list &body f)
-  (flet ((output-defclass-field (toplevel &aux (slot-name (apply-toplevel-op 'name toplevel)))
+  (flet ((output-defclass-field (toplevel &aux (slot-name (toplevel-lambda-var toplevel 'name)))
 	   `(,slot-name :accessor ,(generic-slot-accessor-name type-name slot-name) :initform nil :type ,(apply-toplevel-op 'cl-type-for-field toplevel)))
          (output-defstruct-field (toplevel)
-	   `(,(apply-toplevel-op 'name toplevel) nil :type ,(apply-toplevel-op 'cl-type-for-field toplevel)))
+	   `(,(toplevel-lambda-var toplevel 'name) nil :type ,(apply-toplevel-op 'cl-type-for-field toplevel)))
 	 (more-emitting-p (top-x top-y)
-	   (and (apply-toplevel-op 'emits-field-p top-x)
-		(null (apply-toplevel-op 'emits-field-p top-y)))))
+	   (and (null (toplevel-lambda-var top-x 'ignore)) (toplevel-lambda-var top-y 'ignore))))
     (let* ((documentation (cadr (assoc :documentation f)))
 	   (type (or (cadr (assoc :type f)) :class))
 	   (toplevels (cdr (assoc :fields f)))
 	   (emission-ordered-toplevels (sort (copy-list toplevels) #'more-emitting-p))
-	   (field-count (count-if (curry #'apply-toplevel-op 'emits-field-p) emission-ordered-toplevels))
+	   (field-count (count-if-not (rcurry #'toplevel-lambda-var 'ignore) emission-ordered-toplevels))
 	   (producing-toplevels (subseq emission-ordered-toplevels 0 field-count))
-           (field-names (mapcar (compose (curry #'apply-toplevel-op 'name)) emission-ordered-toplevels)))
+           (field-names (mapcar (compose (the function (rcurry #'toplevel-lambda-var 'name))) emission-ordered-toplevels)))
       (declare (type (member :class :structure) type))
       `(progn
 	 ,@(case type
@@ -751,7 +737,7 @@
   (let ((bintype-name (bintype-name bintype)))
     (export (list* bintype-name
 		   (iter (for toplevel in (bintype-toplevels bintype))
-			 (for name = (apply-toplevel-op 'name toplevel))
+			 (for name = (toplevel-lambda-var toplevel 'name))
 			 (for symbol = (format-symbol (symbol-package bintype-name) "~A-~A" bintype-name name))
                          (collect name)
 			 (collect symbol))))))
