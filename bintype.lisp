@@ -237,13 +237,18 @@
   (op-parameter-destructurer (nil params) typespec
     (lambda-list-application-types-match-p (apply-typespec typeset typespec) params)))
 
+(defun custom-map-lambda-list (fn lambda-list application &key insert-keywords)
+  (map-lambda-list (lambda (type name default actual)
+                     (funcall fn (if (eq type '&mandatory) name default) actual))
+                   lambda-list application :insert-keywords insert-keywords))
+
 ;; Note: the only user of 'custom processing' is the non-working typecase.
 (defun generic-typestack (typespec)
-  (op-parameter-destructurer (nil params) typespec
+  (op-parameter-destructurer (ty params) typespec
     (multiple-value-bind (rest-of-typestack custom-processing) (apply-typespec 'type-paramstack typespec)
       (if custom-processing
           rest-of-typestack
-          (cons (when params `(list ,@(map-lambda-list #'quote-when (apply-typespec 'quotation typespec) params :insert-keywords t))) rest-of-typestack)))))
+          (cons (when params (list* 'list (custom-map-lambda-list #'quote-when (apply-typespec 'quotation typespec) params :insert-keywords t))) rest-of-typestack)))))
 
 (defun runtime-typestack (typespec)
   (op-parameter-destructurer (nil params) typespec
@@ -528,12 +533,13 @@
   (let ((name (apply-toplevel-op 'name toplevel))
         (no-oos (null (cadr (member :out-of-stream-offset toplevel))))
         (typespec (apply-toplevel-op 'typespec toplevel))
-        (quoted-toplevel (map-lambda-list #'quote-when (cons t (apply-toplevel-op 'quotation toplevel)) toplevel :insert-keywords t)))
+        (quoted-toplevel (custom-map-lambda-list #'quote-when (cons t (apply-toplevel-op 'quotation toplevel)) toplevel :insert-keywords t)))
     (with-gensyms (start-offset o-o-s-offset paramstack initargs field-obj)
       (with-named-lambda-emission ((format-symbol nil "~A-~A-PAVEMENT" bintype-name name) (list start-offset)
                                    :declarations (emit-declarations :special '(*self*)))
         `(let* (,@(unless no-oos `((,o-o-s-offset (apply-toplevel-op 'out-of-stream-offset (list ,@quoted-toplevel)))))
-                (,paramstack (list ,@(generic-typestack typespec))) (,initargs (apply-typespec 'initargs (cons ',(first typespec) (first ,paramstack))))
+                (,paramstack (list ,@(generic-typestack typespec)))
+                (,initargs (apply-typespec 'initargs (cons ',(first typespec) (first ,paramstack))))
                 (,field-obj (apply #'make-instance (first ,initargs) :offset ,(if no-oos start-offset `(or ,o-o-s-offset ,start-offset)) :parent *self* :sub-id ',name
                                                                      :typespec ',typespec :params ,paramstack
                                                                      ,@(when-let ((i-t-f-f (apply-toplevel-op 'initial-to-final-xform toplevel)))
