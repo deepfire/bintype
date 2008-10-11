@@ -20,11 +20,11 @@
    (typespec :accessor typespec :initarg :typespec)
    (sub-id :accessor sub-id :initarg :sub-id)
    (width :accessor width :initarg :width)
-   (initial-to-final-fn :accessor initial-to-final-fn :initarg :initial-to-final-fn)
+   (interpreter-fn :accessor interpreter-fn :initarg :interpreter-fn)
    (initial-value :accessor initial-value :initarg :initial-value :initform nil)
    (final-value :accessor final-value :initarg :final-value))
   (:default-initargs
-   :initial-to-final-fn #'values))
+   :interpreter-fn #'values))
 
 (defclass btcontainer (btobj)
   ((paved-p :accessor paved-p :initform nil)
@@ -242,6 +242,9 @@
   (map-lambda-list (lambda (type name default actual)
                      (funcall fn (if (eq type '&mandatory) name default) actual))
                    lambda-list application :insert-keywords insert-keywords))
+
+(defun lambda-list-application-types-match-p (typespec list)
+  (every #'identity (custom-map-lambda-list (order typep 1 0) typespec list)))
 
 ;; Note: the only user of 'custom processing' is the non-working typecase.
 (defun generic-typestack (typespec)
@@ -541,8 +544,8 @@
                 (,initargs (apply-typespec 'initargs (cons ',(first typespec) (first ,paramstack))))
                 (,field-obj (apply #'make-instance (first ,initargs) :offset ,(if oos `(or ,o-o-s-offset ,start-offset) start-offset) :parent *self* :sub-id ',name
                                                                      :typespec ',typespec :params ,paramstack
-                                                                     ,@(when-let ((i-t-f-f (apply-toplevel-op 'initial-to-final-xform toplevel)))
-                                                                                 `(:initial-to-final-fn ,i-t-f-f)) (rest ,initargs))))
+                                                                     ,@(when-let ((i-t-f-f (apply-toplevel-op 'interpreter-xform toplevel)))
+                                                                                 `(:interpreter-fn ,i-t-f-f)) (rest ,initargs))))
            (process-field ,field-obj ,(apply-toplevel-op 'immediate-eval toplevel) ,start-offset ,(when oos o-o-s-offset)))))))
 
 (defun set-endianness (val)
@@ -555,19 +558,19 @@
     `(compose ,@(mapcar (curry #'emit-toplevel-pavement name) (reverse toplevels)))))
 
 (define-lambda-map toplevel-op value (name typespec &key ignore out-of-stream-offset)
-  (typespec (typespec)				typespec)
-  (cl-type-for-field (typespec)			`(or null ,(apply-typespec 'cl-type typespec)))
-  (quotation ()					'(t t &rest nil))
-  (immediate-eval ()				nil)
-  (initial-to-final-xform ()			'#'values))
+  (typespec (typespec)                  typespec)
+  (cl-type-for-field (typespec)         `(or null ,(apply-typespec 'cl-type typespec)))
+  (quotation ()                         '(t t &rest nil))
+  (immediate-eval ()                    nil)
+  (interpreter-xform ()                 '#'values))
 
 (define-lambda-map toplevel-op flag (name &key ignore out-of-stream-offset)
-  (typespec ()			        	'(unsigned-byte 1))
-  (cl-type-for-field ()			        'boolean)
-  (quotation ()					'(t &rest nil))
-  (immediate-eval ()				nil)
-  (initial-to-final-xform ()			(emit-lambda '(val obj) (list (list 'plusp 'val))
-							     :declarations (emit-declarations :ignore '(obj)))))
+  (typespec ()                          '(unsigned-byte 1))
+  (cl-type-for-field ()                 'boolean)
+  (quotation ()                         '(t &rest nil))
+  (immediate-eval ()                    nil)
+  (interpreter-xform ()                 (emit-lambda '(val obj) (list (list 'plusp 'val))
+                                                     :declarations (emit-declarations :ignore '(obj)))))
 
 (defun case-able (obj)
   (typep obj '(or number symbol)))
@@ -587,30 +590,30 @@
                          :format-arguments (list ,testform ',(mapcar #'car matchforms))))))))
 
 (define-lambda-map toplevel-op match (name typespec values &key ignore out-of-stream-offset)
-  (typespec (typespec)				typespec)
-  (cl-type-for-field ()				t) ;; try to calculate the most specific common type of values
-  (quotation ()					'(t t t &rest nil))
-  (immediate-eval (values)			t)
-  (initial-to-final-xform (values) 		(emit-lambda '(val obj) (list (emit-match-cond/case 'val values))
-							     :declarations (emit-declarations :ignore '(obj)))))
+  (typespec (typespec)                  typespec)
+  (cl-type-for-field ()                 t) ;; try to calculate the most specific common type of values
+  (quotation ()                         '(t t t &rest nil))
+  (immediate-eval (values)              t)
+  (interpreter-xform (values)           (emit-lambda '(val obj) (list (emit-match-cond/case 'val values))
+                                                     :declarations (emit-declarations :ignore '(obj)))))
 
 (define-lambda-map toplevel-op indirect (name direct-typespec result-toplevel &key ignore out-of-stream-offset final-value)
   (typespec (direct-typespec result-toplevel final-value)
 	    					(if final-value
 						    (apply-toplevel-op 'typespec result-toplevel)
 						    direct-typespec))
-  (cl-type-for-field (result-toplevel)		(apply-toplevel-op 'cl-type-for-field result-toplevel))
-  (quotation ()					'(t t t &rest nil))
-  (immediate-eval (result-toplevel)		(apply-toplevel-op 'immediate-eval result-toplevel))
-  (initial-to-final-xform (result-toplevel)     `(compose ,(apply-toplevel-op 'initial-to-final-xform result-toplevel)
-                                                          ,(emit-lambda `(*direct-value* obj &aux (*self* (parent obj)))
-                                                                        `((fill-value (nth-value 1 (funcall ,(emit-toplevel-pavement nil result-toplevel) (offset obj)))))
-                                                                        :declarations (emit-declarations :special `(*self* *direct-value*))))))
+  (cl-type-for-field (result-toplevel)  (apply-toplevel-op 'cl-type-for-field result-toplevel))
+  (quotation ()                         '(t t t &rest nil))
+  (immediate-eval (result-toplevel)     (apply-toplevel-op 'immediate-eval result-toplevel))
+  (interpreter-xform (result-toplevel)  `(compose ,(apply-toplevel-op 'interpreter-xform result-toplevel)
+                                                  ,(emit-lambda `(*direct-value* obj &aux (*self* (parent obj)))
+                                                                `((fill-value (nth-value 1 (funcall ,(emit-toplevel-pavement nil result-toplevel) (offset obj)))))
+                                                                :declarations (emit-declarations :special `(*self* *direct-value*))))))
 
 #| Fact: during fill-value, only leaves need offset, which is of little wonder. |#
 (defgeneric fill-value (btobject)
   (:method ((obj btobj))
-    (setf (final-value obj) (funcall (initial-to-final-fn obj) (initial-value obj) obj)))
+    (setf (final-value obj) (funcall (interpreter-fn obj) (initial-value obj) obj)))
   (:method ((obj btleaf))
     (setf (initial-value obj) (funcall (btleaf-value-fn obj) obj))
     (call-next-method))
