@@ -121,9 +121,6 @@
 (defun toplevel-lambda-var (toplevel var)
   (lambda-list-1 (toplevel-op-lambda-list (car toplevel)) (rest toplevel) var))
 
-(defun bintype-toplevel (bintype name)
-  (find name (bintype-toplevels bintype) :key (rcurry #'toplevel-lambda-var 'name)))
-
 (defun slot-number (bintype slot-name)
   (position slot-name (bintype-slot-map bintype) :test #'eq))
 
@@ -722,7 +719,7 @@
                                              (collect `(lambda (val o)
                                                          (setf (,(generic-slot-accessor-name type-name field-name) o) val)))))))))
 	 (define-primitive-type ,type-name ,lambda-list
-           (defun apply-safe-parameter-types () '(&rest (integer 0)))
+           (defun apply-safe-parameter-types () '(&rest t))
            (defun type-paramstack ())
            (defun runtime-type-paramstack ())
            (defun constant-width () (btstructured-constant-width ',type-name))
