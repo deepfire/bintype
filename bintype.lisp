@@ -305,11 +305,12 @@
 (define-condition displacement-out-of-range (bintype-parse-error)
   ((offset :accessor condition-offset :initarg :offset)
    (length :accessor condition-length :initarg :length)
-   (misfit :accessor condition-misfit :initarg :misfit))
+   (misfit :accessor condition-misfit :initarg :misfit)
+   (obj :accessor condition-obj :initarg :obj))
   (:report
    (lambda (cond stream)
-     (format stream "~@<displaced vector of length ~S at byte offset ~S doesn't fit the underlying sequence by ~S elements~:@>"
-             (condition-length cond) (condition-offset cond) (- (condition-length cond) (condition-misfit cond))))))
+     (format stream "~@<~S: displaced vector of length ~S at byte offset ~S doesn't fit the underlying sequence by ~S elements~:@>"
+             (condition-obj cond) (condition-length cond) (condition-offset cond) (- (condition-length cond) (condition-misfit cond))))))
 
 (defun stream-format (format-string &rest rest)
   (lambda (stream)
@@ -323,7 +324,7 @@
            :format-arguments (list (type-of *sequence*))))
   (let ((misfit (- (+ (ash (offset obj) -3) dimension) (array-dimension *sequence* 0))))
     (restart-case (when (plusp misfit)
-                    (error 'displacement-out-of-range :length dimension :offset (ash (offset obj) -3) :misfit misfit))
+                    (error 'displacement-out-of-range :obj obj :length dimension :offset (ash (offset obj) -3) :misfit misfit))
       (trim (cond)
        :report "Trim the displaced vector to fit."
        (declare (ignore cond))
