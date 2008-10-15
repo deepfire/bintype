@@ -149,6 +149,7 @@
              :cormat-arguments (list btcontainer sel)))))
 
 (defun read-bits (obj width &aux (offset (offset obj)) (bytespan (1+ (ash (+ width (logand offset #x7)) -3))))
+  "Buggy. Try undefine 64bit stuff and see the world go down.."
   (declare (special *u-reader* *sequence*))
   (ldb (byte width (logand offset #x7)) (funcall *u-reader* *sequence* (ash offset -3) bytespan)))
 
@@ -163,6 +164,10 @@
 (defun generic-u32-reader (obj)
   (declare (special *u32-reader* *sequence*))
   (funcall *u32-reader* *sequence* (ash (offset obj) -3)))
+
+(defun generic-u64-reader (obj)
+  (declare (special *u64-reader* *sequence*))
+  (funcall *u64-reader* *sequence* (ash (offset obj) -3)))
 
 (defun generic-s8-reader (obj)
   (declare (special *sequence*))
@@ -183,6 +188,13 @@
   (let ((val (funcall *u32-reader* *sequence* (ash (offset obj) -3))))
     (if (logbitp 31 val)
         (- val #x100000000)
+        val)))
+
+(defun generic-s64-reader (obj)
+  (declare (special *u64-reader* *sequence*))
+  (let ((val (funcall *u64-reader* *sequence* (ash (offset obj) -3))))
+    (if (logbitp 63 val)
+        (- val #x10000000000000000)
         val)))
 
 (defparameter *primitive-types* (make-hash-table :test #'eq))
@@ -244,11 +256,12 @@
   (every #'identity (custom-map-lambda-list (order typep 1 0) typespec list)))
 
 ;; Note: the only user of 'custom processing' is the non-working typecase.
-(defun generic-typestack (typespec)
+(defun typestack (typespec)
+  "Obtain the whole type invocation stack for TYPESPEC."
   (op-parameter-destructurer (nil params) typespec
-    (multiple-value-bind (rest-of-typestack custom-processing) (apply-typespec 'type-paramstack typespec)
+    (multiple-value-bind (rest-of-typestack custom-processing) (apply-typespec 'child-typestack typespec)
       (if custom-processing
-          rest-of-typestack
+          (values rest-of-typestack t)
           (cons (when params (list* 'list (custom-map-lambda-list #'quote-when (apply-typespec 'quotation typespec) params :insert-keywords t))) rest-of-typestack)))))
 
 (defun runtime-typestack (typespec)
@@ -258,7 +271,7 @@
 (define-primitive-type unsigned-byte (width)
   (defun apply-safe-parameter-types () '((integer 0)))
   (defun constant-width (width) width)
-  (defun type-paramstack ())
+  (defun child-typestack ())
   (defun runtime-type-paramstack ())
   (defun initargs (width)
     (list 'btleaf
@@ -266,6 +279,7 @@
                  (8 #'generic-u8-reader)
                  (16 #'generic-u16-reader)
                  (32 #'generic-u32-reader)
+                 (64 #'generic-u64-reader)
                  (t (lambda (obj) (read-bits obj width))))
      :width width))
   (defun cl-type (width) `(unsigned-byte ,width))
@@ -274,7 +288,7 @@
 (define-primitive-type signed-byte (width)
   (defun apply-safe-parameter-types () '(integer))
   (defun constant-width (width) width)
-  (defun type-paramstack ())
+  (defun child-typestack ())
   (defun runtime-type-paramstack ())
   (defun initargs (width)
     (list 'btleaf
@@ -282,6 +296,7 @@
                  (8 #'generic-s8-reader)
                  (16 #'generic-s16-reader)
                  (32 #'generic-s32-reader)
+                 (64 #'generic-s64-reader)
                  (t (lambda (obj &aux (val (read-bits obj width)))
                       (if (logbitp (1- width) val) (- val (ash 1 width)) val))))
      :width width))
@@ -293,7 +308,7 @@
 (define-primitive-type pure (typespec expression)
   (defun apply-safe-parameter-types () '(t t))
   (defun constant-width () 0)
-  (defun type-paramstack ())
+  (defun child-typestack ())
   (defun runtime-type-paramstack ())
   (defun initargs (expression)
     (list 'btleaf :value-fn (constantly expression) :width 0))
@@ -334,7 +349,7 @@
 (define-primitive-type displaced-u8-vector (length)
   (defun apply-safe-parameter-types () '((integer 0)))
   (defun constant-width (length) (ash length 3))
-  (defun type-paramstack ())
+  (defun child-typestack ())
   (defun runtime-type-paramstack ())
   (defun initargs (length)
     (list 'btleaf :value-fn (curry #'consume-displaced-u8-vector length) :width (ash length 3)))
@@ -346,7 +361,7 @@
 (define-primitive-type current-offset (width)
   (defun apply-safe-parameter-types () '((integer 0)))
   (defun constant-width () 0)
-  (defun type-paramstack ())
+  (defun child-typestack ())
   (defun runtime-type-paramstack ())
   (defun initargs ()
     (list 'btleaf :value-fn #'(lambda (obj) (ash (offset obj) -3)) :width 0))
@@ -365,7 +380,7 @@
 (define-primitive-type zero-terminated-string (dimension)
   (defun apply-safe-parameter-types () '((integer 0)))
   (defun constant-width (dimension) (ash dimension 3))
-  (defun type-paramstack ())
+  (defun child-typestack ())
   (defun runtime-type-paramstack ())
   (defun initargs (dimension)
     (list 'btleaf :value-fn (curry #'consume-zero-terminated-string dimension) :width (ash dimension 3)))
@@ -377,7 +392,7 @@
 (define-primitive-type zero-terminated-symbol (dimension &optional (package :keyword))
   (defun apply-safe-parameter-types () '((integer 0) &optional t))
   (defun constant-width (dimension) (ash dimension 3))
-  (defun type-paramstack ())
+  (defun child-typestack ())
   (defun runtime-type-paramstack ())
   (defun initargs (dimension package)
     (list 'btleaf :value-fn (compose (the function (rcurry #'intern package)) #'string-upcase (the function (curry #'consume-zero-terminated-string dimension)))
@@ -395,7 +410,7 @@
                                          (and (typespec-types-match-p 'apply-safe-parameter-types element-type)
                                               (apply-typespec 'constant-width element-type))))))
       (* constant-stride dimension 8)))
-  (defun type-paramstack (element-type) (generic-typestack element-type))
+  (defun child-typestack (element-type) (typestack element-type))
   (defun runtime-type-paramstack (element-type) (runtime-typestack element-type))
   (defun initargs (dimension element-type stride stride-fn)
     (unless (primitive-type-p element-type)
@@ -424,7 +439,7 @@
 (define-primitive-type orderedpack (stream-size &key element-type (format :list))
   (defun apply-safe-parameter-types () '((integer 0) &key (element-type t) (format t)))
   (defun constant-width (stream-size) (ash stream-size 3))
-  (defun type-paramstack (element-type) (generic-typestack element-type))
+  (defun child-typestack (element-type) (typestack element-type))
   (defun runtime-type-paramstack (element-type) (runtime-typestack element-type))
   (defun initargs (stream-size element-type)
     (unless (primitive-type-p element-type)
@@ -441,31 +456,24 @@
 
 ;;; Warning: DISPATCH-VALUE is the only known instance of double evaluation. Not easy to get rid of.
 (define-primitive-type typecase (dispatch-value &rest types)
-  (defun apply-safe-parameter-types () '(nil &rest nil))
+  (defun apply-safe-parameter-types () '(t &rest t))
   (defun constant-width () nil)
-  (defun type-paramstack (dispatch-value types)
+  (defun child-typestack (dispatch-value types)
     (values (list (once-only (dispatch-value)
                     `(case ,dispatch-value
                        ,@(iter (for (signature type) in types)
-                               (collect `(,signature ,@(generic-typestack type))))
+                               (collect `(,signature (list ',type ,@(apply-typespec 'child-typestack type)))))
                        (t (error 'bintype-simple-parse-error
                                  :format-control "no type for dispatch value ~S"
                                  :format-arguments (list ,dispatch-value))))))
-            t))
+            :process-me-specially-please))
   (defun runtime-type-paramstack () (error 'bintype-simple-error :format-control "Broken." :format-arguments nil))
   (defun cl-type (types)
     `(or ,@(mapcar (compose (curry #'apply-typespec 'cl-type) #'second) types)))
   (defun quotation ()
     `(&rest nil))
-  (defun initargs (dispatch-value types)
-    (once-only (dispatch-value)
-      (case dispatch-value
-	 (cons 'quote
-               (iter (for (signature type) in types)
-                     (collect `(,signature (apply-typespec 'initargs (list ,@type))))))
-	 (t (error 'bintype-simple-parse-error
-                   :format-control "no type for dispatch value ~S"
-                   :format-arguments (list dispatch-value)))))))
+  (defun initargs (types)
+    (apply-typespec 'initargs (rest types))))
 
 (defun btstructured-constant-width (type-name)
   (let ((typespecs (mapcar (curry #'apply-toplevel-op 'typespec) (bintype-toplevels (bintype type-name)))))
@@ -535,16 +543,19 @@
   (let ((name (toplevel-lambda-var toplevel 'name))
         (oos (toplevel-lambda-var toplevel 'out-of-stream-offset))
         (typespec (apply-toplevel-op 'typespec toplevel)))
-    (with-gensyms (start-offset o-o-s-offset paramstack initargs field-obj)
+    (with-gensyms (start-offset o-o-s-offset pretypestack subtype typestack initargs field-obj)
       (with-named-lambda-emission ((format-symbol nil "~A-~A-PAVEMENT" bintype-name name) (list start-offset)
                                    :declarations (emit-declarations :special '(*self*)))
-        `(let* (,@(when oos `((,o-o-s-offset ,oos))) (,paramstack (list ,@(generic-typestack typespec)))
-                (,initargs (apply-typespec 'initargs (cons ',(first typespec) (first ,paramstack))))
-                (,field-obj (apply #'make-instance (first ,initargs) :offset ,(if oos `(or ,o-o-s-offset ,start-offset) start-offset) :parent *self* :sub-id ',name
-                                                                     :typespec ',typespec :params ,paramstack
-                                                                     ,@(when-let ((i-t-f-f (apply-toplevel-op 'interpreter-xform toplevel)))
-                                                                                 `(:interpreter-fn ,i-t-f-f)) (rest ,initargs))))
-           (process-field ,field-obj ,(apply-toplevel-op 'immediate-eval toplevel) ,start-offset ,(when oos o-o-s-offset)))))))
+        (multiple-value-bind (the-typestack custom-initargs-p) (typestack typespec)
+          `(let* (,@(when oos `((,o-o-s-offset ,oos))) (,pretypestack (list ,@the-typestack))
+                    (,subtype ,(if custom-initargs-p `(op-parameter-destructurer (type nil) (first ,pretypestack) type) `',(first typespec)))
+                    (,typestack ,(if custom-initargs-p `(op-parameter-destructurer (nil params) (first ,pretypestack) (list params)) pretypestack))
+                    (,initargs (apply-typespec 'initargs (cons ,subtype (first ,typestack))))
+                    (,field-obj (apply #'make-instance (first ,initargs) :offset ,(if oos `(or ,o-o-s-offset ,start-offset) start-offset) :parent *self* :sub-id ',name
+                                       :typespec ',typespec :params ,typestack
+                                       ,@(when-let ((i-t-f-f (apply-toplevel-op 'interpreter-xform toplevel)))
+                                                   `(:interpreter-fn ,i-t-f-f)) (rest ,initargs))))
+             (process-field ,field-obj ,(apply-toplevel-op 'immediate-eval toplevel) ,start-offset ,(when oos o-o-s-offset))))))))
 
 (defun set-endianness (val)
   (declare (type (member :little-endian :big-endian) val) (special *endianness-setter*))
@@ -664,34 +675,36 @@
 			   (iterate (sub current (first designators)) (rest designators))))))
     (iterate current designators)))
 
-(defun parse (typespec sequence &key (endianness :little-endian) (offset 0) (error-p t) &aux *u-reader* *u16-reader* *u32-reader*)
+(defun parse (typespec sequence &key (endianness :little-endian) (offset 0) (error-p t) &aux *u-reader* *u16-reader* *u32-reader* *u64-reader*)
   "Parse *SEQUENCE* according to the TYPESPEC, ENDIANNESS and OFFSET, returning parsed structure. 
    ERROR-P controls whether parse errors result in conditions of BINTYPE-PARSE-ERROR subtype being signalled.
    Note that errors of BINTYPE-SPEC-ERROR subtype are signalled regardless of ERROR-P."
-  (declare (special *u-reader* *u16-reader* *u32-reader*))
+  (declare (special *u-reader* *u16-reader* *u32-reader* *u64-reader*))
   (let ((*sequence* (coerce-to-sequence sequence))
         (*endianness-setter* (lambda (val)
-			       (setf (values *u-reader* *u16-reader* *u32-reader*)
+			       (setf (values *u-reader* *u16-reader* *u32-reader* *u64-reader*)
 				     (ecase val
-				       (:little-endian (values #'u8-seq-wordle #'u8-seq-word16le #'u8-seq-word32le))
-				       (:big-endian (values #'u8-seq-wordbe #'u8-seq-word16be #'u8-seq-word32be)))))))
+				       (:little-endian (values #'u8-seq-wordle #'u8-seq-word16le #'u8-seq-word32le #'u8-seq-word64le))
+				       (:big-endian (values #'u8-seq-wordbe #'u8-seq-word16be #'u8-seq-word32be #'u8-seq-word64be)))))))
     (declare (special *sequence* *endianness-setter*))
     (funcall *endianness-setter* endianness)
     (op-parameter-destructurer (op nil) typespec
-      (handler-case 
-          (let* ((paramstack (runtime-typestack typespec))
-                 (initargs (apply-typespec 'initargs (cons op (first paramstack))))
-                 (obj (apply #'make-instance (first initargs) :offset (ash offset 3) :typespec typespec :params paramstack (rest initargs))))
+      (handler-bind ((bintype-parse-error (lambda (c) (when error-p (error c)))))
+          (let* ((typestack (runtime-typestack typespec))
+                 (initargs (apply-typespec 'initargs (cons op (first typestack))))
+                 (obj (apply #'make-instance (first initargs) :offset (ash offset 3) :typespec typespec :params typestack (rest initargs))))
             (pave obj)
-            (fill-value obj))
-        (bintype-parse-error (c) (when error-p (error c)))))))
+            (fill-value obj))))))
 
-(defun generic-slot-accessor-name (type-name slot-name)
-  (format-symbol (symbol-package type-name) "~A-~A" type-name slot-name))
+(defun generic-slot-accessor-name (package prefix slot-name)
+  (format-symbol package "~A~A" prefix slot-name))
 
-(defmacro defbintype (type-name lambda-list &body f)
+(defmacro defbintype (type-name lambda-list &body f &aux (prefix (if-let (custom-prefix (cadr (assoc :prefix f)))
+                                                                         (write-to-string custom-prefix :escape nil)
+                                                                         (format nil "~A-" type-name))))
   (flet ((output-defclass-field (toplevel &aux (slot-name (toplevel-lambda-var toplevel 'name)))
-	   `(,slot-name :accessor ,(generic-slot-accessor-name type-name slot-name) :initform nil :type ,(apply-toplevel-op 'cl-type-for-field toplevel)))
+	   `(,slot-name :accessor ,(generic-slot-accessor-name (symbol-package type-name) prefix slot-name)
+                        :initform nil :type ,(apply-toplevel-op 'cl-type-for-field toplevel)))
          (output-defstruct-field (toplevel)
 	   `(,(toplevel-lambda-var toplevel 'name) nil :type ,(apply-toplevel-op 'cl-type-for-field toplevel)))
 	 (more-emitting-p (top-x top-y)
@@ -718,10 +731,10 @@
                                (list ,@(iter (for field-name in field-names)
                                              (repeat field-count)
                                              (collect `(lambda (val o)
-                                                         (setf (,(generic-slot-accessor-name type-name field-name) o) val)))))))))
+                                                         (setf (,(generic-slot-accessor-name (symbol-package type-name) prefix field-name) o) val)))))))))
 	 (define-primitive-type ,type-name ,lambda-list
            (defun apply-safe-parameter-types () '(&rest t))
-           (defun type-paramstack ())
+           (defun child-typestack ())
            (defun runtime-type-paramstack ())
            (defun constant-width () (btstructured-constant-width ',type-name))
 	   (defun initargs ,(lambda-list-binds lambda-list) (declare (ignorable ,@(lambda-list-binds lambda-list)))
