@@ -7,4 +7,4 @@
    #:flag #:match #:plain #:indirect
    #:pure #:current-offset #:displaced-u8-vector #:zero-terminated-string #:zero-terminated-symbol #:funcstride-sequence
    #:set-endianness #:offset #:parent #:sub #:value #:path-value
-   #:*self* #:*direct-value* #:displacement-out-of-range #:trim))
+   #:*self* #:*sequence* #:*direct-value* #:displacement-out-of-range #:trim))
