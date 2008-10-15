@@ -8,4 +8,5 @@
 (defsystem :bintype
   :depends-on (:alexandria :pergamum)
   :components
-  ((:file "bintype")))
+  ((:file "packages")
+   (:file "bintype" :depends-on ("packages"))))
