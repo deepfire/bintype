@@ -678,7 +678,7 @@
     (declare (special *sequence* *endianness-setter*))
     (funcall *endianness-setter* endianness)
     (op-parameter-destructurer (op nil) typespec
-      (handler-bind ((bintype-parse-error (lambda (c) (when error-p (error c)))))
+      (handler-bind ((bintype-parse-error (lambda (c) (declare (ignore c)) (unless error-p (return-from parse)))))
           (let* ((typestack (runtime-typestack typespec))
                  (initargs (apply-typespec 'initargs (cons op (first typestack))))
                  (obj (apply #'make-instance (first initargs) :offset (ash offset 3) :typespec typespec :params typestack (rest initargs))))
