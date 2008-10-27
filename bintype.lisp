@@ -1,3 +1,23 @@
+;;; -*- Mode: LISP; Syntax: COMMON-LISP; Package: BINTYPE; Base: 10 -*-
+;;;
+;;;  (c) copyright 2007-2008 by
+;;;           Samium Gromoff (_deepfire@feelingofgreen.ru)
+;;;
+;;; This library is free software; you can redistribute it and/or
+;;; modify it under the terms of the GNU Library General Public
+;;; License as published by the Free Software Foundation; either
+;;; version 2 of the License, or (at your option) any later version.
+;;;
+;;; This library is distributed in the hope that it will be useful,
+;;; but WITHOUT ANY WARRANTY; without even the implied warranty of
+;;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+;;; Library General Public License for more details.
+;;;
+;;; You should have received a copy of the GNU Library General Public
+;;; License along with this library; if not, write to the
+;;; Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+;;; Boston, MA  02111-1307  USA.
+
 (in-package :bintype)
 
 (defvar *bintypes* (make-hash-table))
@@ -425,23 +445,25 @@
   (defun quotation ()
     '(nil &key (element-type t) stride stride-fn format)))
 
-(define-primitive-type orderedpack (stream-size &key element-type (format :list))
+(define-primitive-type orderedpack (stream-size &key element-type (length-guess 16) (format :list))
   (defun apply-safe-parameter-types () '((integer 0) &key (element-type t) (format t)))
   (defun constant-width (stream-size) (ash stream-size 3))
   (defun child-typestack (element-type) (typestack element-type))
   (defun runtime-type-paramstack (element-type) (runtime-typestack element-type))
-  (defun initargs (stream-size element-type)
+  (defun initargs (stream-size element-type length-guess)
+    (declare (optimize (debug 3)))
     (unless (primitive-type-p element-type)
       (error 'bintype-simple-spec-error
              :format-control "unknown sequence element type ~S."
              :format-arguments (list element-type)))
-    (list 'btorderedpack :element-type element-type :width (ash stream-size 3)))
+    (format t "length guess: ~S~%" length-guess)
+    (list 'btorderedpack :element-type element-type :length-guess length-guess :width (ash stream-size 3)))
   (defun cl-type (element-type format)
     (ecase format
       (:list 'list)
       (:vector `(vector ,(apply-typespec 'cl-type element-type)))))
   (defun quotation ()
-    '(nil &key (element-type t) format)))
+    '(nil &key (element-type t) length-guess format)))
 
 ;;; Warning: DISPATCH-VALUE is the only known instance of double evaluation. Not easy to get rid of.
 (define-primitive-type typecase (dispatch-value &rest types)
