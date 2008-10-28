@@ -106,6 +106,7 @@
 
 (defstruct bintype
   (name nil :type symbol)
+  prefix
   (documentation nil :type (or null string))
   lambda-list
   instantiator
@@ -735,7 +736,7 @@
          (let ((field-names ',field-names))
 	  (setf (gethash ',type-name *bintypes*)
 		(make-bintype :name ',type-name :documentation ,documentation :lambda-list ',lambda-list :toplevels ',toplevels
-			      :slot-map (make-array ,(length toplevels) :initial-contents field-names)
+			      :slot-map (make-array ,(length toplevels) :initial-contents field-names) :prefix ',prefix
 			      :setter-map
                               (make-array ,field-count
                                :initial-contents
@@ -759,10 +760,11 @@
                  (bintype-paver bintype) ,(output-paver-lambda type-name lambda-list toplevels)))))))
 
 (defun export-bintype (bintype)
-  (let ((bintype-name (bintype-name bintype)))
-    (export (list* bintype-name
-		   (iter (for toplevel in (bintype-toplevels bintype))
-			 (for name = (toplevel-lambda-var toplevel 'name))
-			 (for symbol = (format-symbol (symbol-package bintype-name) "~A-~A" bintype-name name))
-                         (collect name)
-			 (collect symbol))))))
+  (with-slots (name prefix toplevels) bintype
+    (export
+     (list* name
+            (iter (for toplevel in toplevels)
+                  (for toplevel-name = (toplevel-lambda-var toplevel 'name))
+                  (for symbol = (format-symbol (symbol-package name) "~A~A" prefix toplevel-name))
+                  (collect toplevel-name)
+                  (collect symbol))))))
