@@ -1,3 +1,6 @@
+;;; -*- Mode: LISP; Syntax: COMMON-LISP; Package: BINTYPE; Base: 10 -*-
+;;;
+
 (defpackage bintype
   (:use :common-lisp :alexandria :pergamum :iterate)
   (:export
