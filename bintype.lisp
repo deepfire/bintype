@@ -628,7 +628,7 @@
   (typespec (typespec)                  typespec)
   (cl-type-for-field ()                 t) ;; try to calculate the most specific common type of values
   (quotation ()                         '(t t t &rest nil))
-  (immediate-eval (values)              t)
+  (immediate-eval ()                    t)
   (interpreter-xform (values)           (emit-lambda '(val obj) (list (emit-match-cond/case 'val values))
                                                      :declarations (emit-declarations :ignore '(obj)))))
 
