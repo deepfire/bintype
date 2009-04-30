@@ -555,19 +555,25 @@
   (let ((name (toplevel-lambda-var toplevel 'name))
         (oos (toplevel-lambda-var toplevel 'out-of-stream-offset))
         (typespec (apply-toplevel-op 'typespec toplevel)))
-    (with-gensyms (start-offset o-o-s-offset pretypestack subtype typestack initargs field-obj)
+    (with-gensyms (start-offset o-o-s-offset pretypestack subtype typestack btobj-type btobj-args)
       (with-named-lambda-emission ((format-symbol nil "~A-~A-PAVEMENT" bintype-name name) (list start-offset)
                                    :declarations (emit-declarations :special '(*self*)))
         (multiple-value-bind (the-typestack custom-initargs-p) (typestack typespec)
-          `(let* (,@(when oos `((,o-o-s-offset ,oos))) (,pretypestack (list ,@the-typestack))
-                    (,subtype ,(if custom-initargs-p `(op-parameter-destructurer (type nil) (first ,pretypestack) type) `',(first typespec)))
-                    (,typestack ,(if custom-initargs-p `(op-parameter-destructurer (nil params) (first ,pretypestack) (list params)) pretypestack))
-                    (,initargs (apply-typespec 'initargs (cons ,subtype (first ,typestack))))
-                    (,field-obj (apply #'make-instance (first ,initargs) :offset ,(if oos `(or ,o-o-s-offset ,start-offset) start-offset) :parent *self* :sub-id ',name
-                                       :typespec ',typespec :params ,typestack
-                                       ,@(when-let ((i-t-f-f (apply-toplevel-op 'interpreter-xform toplevel)))
-                                                   `(:interpreter-fn ,i-t-f-f)) (rest ,initargs))))
-             (process-field ,field-obj ,(apply-toplevel-op 'immediate-eval toplevel) ,start-offset ,(when oos o-o-s-offset))))))))
+          `(let* (,@(when oos `((,o-o-s-offset ,oos)))
+                  (,pretypestack (list ,@the-typestack))
+                  (,subtype ,(if custom-initargs-p `(op-parameter-destructurer (type nil) (first ,pretypestack) type) `',(first typespec)))
+                  (,typestack ,(if custom-initargs-p `(op-parameter-destructurer (nil params) (first ,pretypestack) (list params)) pretypestack)))
+             (process-field (destructuring-bind (,btobj-type &rest ,btobj-args) (apply-typespec 'initargs (cons ,subtype (first ,typestack)))
+                              (apply #'make-instance ,btobj-type
+                                     :offset ,(if oos `(or ,o-o-s-offset ,start-offset) start-offset)
+                                     :parent *self*
+                                     :sub-id ',name
+                                     :typespec ',typespec
+                                     :params ,typestack
+                                     ,@(when-let ((initial-to-final-fn (apply-toplevel-op 'interpreter-xform toplevel)))
+                                                 `(:interpreter-fn ,initial-to-final-fn))
+                                     ,btobj-args))
+                            ,(apply-toplevel-op 'immediate-eval toplevel) ,start-offset ,(when oos o-o-s-offset))))))))
 
 (defun set-endianness (val)
   (declare (type (member :little-endian :big-endian) val) (special *endianness-setter*))
