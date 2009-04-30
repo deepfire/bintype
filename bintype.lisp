@@ -578,14 +578,14 @@
                                :declarations (emit-declarations :special '(*sequence*)))
     `(compose ,@(mapcar (curry #'emit-toplevel-pavement name) (reverse toplevels)))))
 
-(define-lambda-map toplevel-op value (name typespec &key ignore out-of-stream-offset)
+(define-lambda-map toplevel-op value (name typespec &key ignore out-of-stream-offset doc)
   (typespec (typespec)                  typespec)
   (cl-type-for-field (typespec)         `(or null ,(apply-typespec 'cl-type typespec)))
   (quotation ()                         '(t t &rest nil))
   (immediate-eval ()                    nil)
   (interpreter-xform ()                 '#'values))
 
-(define-lambda-map toplevel-op flag (name &key ignore out-of-stream-offset)
+(define-lambda-map toplevel-op flag (name &key ignore out-of-stream-offset doc)
   (typespec ()                          '(unsigned-byte 1))
   (cl-type-for-field ()                 'boolean)
   (quotation ()                         '(t &rest nil))
@@ -610,7 +610,7 @@
                          :format-control "Value ~S didn't match any of ~S."
                          :format-arguments (list ,testform ',(mapcar #'car matchforms))))))))
 
-(define-lambda-map toplevel-op match (name typespec values &key ignore out-of-stream-offset)
+(define-lambda-map toplevel-op match (name typespec values &key ignore out-of-stream-offset doc)
   (typespec (typespec)                  typespec)
   (cl-type-for-field ()                 t) ;; try to calculate the most specific common type of values
   (quotation ()                         '(t t t &rest nil))
@@ -618,7 +618,7 @@
   (interpreter-xform (values)           (emit-lambda '(val obj) (list (emit-match-cond/case 'val values))
                                                      :declarations (emit-declarations :ignore '(obj)))))
 
-(define-lambda-map toplevel-op indirect (name direct-typespec result-toplevel &key ignore out-of-stream-offset final-value)
+(define-lambda-map toplevel-op indirect (name direct-typespec result-toplevel &key ignore out-of-stream-offset final-value doc)
   (typespec (direct-typespec result-toplevel final-value)
 	    					(if final-value
 						    (apply-toplevel-op 'typespec result-toplevel)
@@ -711,12 +711,18 @@
 (defun generic-slot-accessor-name (package prefix slot-name)
   (format-symbol package "~A~A" prefix slot-name))
 
-(defmacro defbintype (type-name lambda-list &body f &aux (prefix (if-let (custom-prefix (cadr (assoc :prefix f)))
-                                                                         (write-to-string custom-prefix :escape nil)
-                                                                         (format nil "~A-" type-name))))
-  (flet ((output-defclass-field (toplevel &aux (slot-name (toplevel-lambda-var toplevel 'name)))
-	   `(,slot-name :accessor ,(generic-slot-accessor-name (symbol-package type-name) prefix slot-name)
-                        :initform nil :type ,(apply-toplevel-op 'cl-type-for-field toplevel)))
+(defmacro defbintype (type-name lambda-list &body f &aux
+                      (custom-prefix (cadr (assoc :prefix f)))
+                      (prefix (if custom-prefix 
+                                  (write-to-string custom-prefix :escape nil)
+                                  (format nil "~A-" type-name))))
+  (flet ((output-defclass-field (toplevel)
+           (let ((slot-name (toplevel-lambda-var toplevel 'name))
+                 (doc (toplevel-lambda-var toplevel 'doc)))
+            `(,slot-name :accessor ,(generic-slot-accessor-name (symbol-package type-name) prefix slot-name)
+                         :initform nil :type ,(apply-toplevel-op 'cl-type-for-field toplevel)
+                         ,@(when doc `(:documentation ,doc)))))
+         ;; No documentation for DEFSTRUCT slots...
          (output-defstruct-field (toplevel)
 	   `(,(toplevel-lambda-var toplevel 'name) nil :type ,(apply-toplevel-op 'cl-type-for-field toplevel)))
 	 (more-emitting-p (top-x top-y)
