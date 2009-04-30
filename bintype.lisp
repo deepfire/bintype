@@ -613,7 +613,7 @@
 
 (define-lambda-map toplevel-op expr (name src-typespec cl-typespec expr &key ignore out-of-stream-offset doc)
   (typespec (src-typespec)              src-typespec)
-  (cl-type-for-field (src-typespec cl-typespec) `(or null ,(apply-typespec 'cl-type (or cl-typespec src-typespec))))
+  (cl-type-for-field (src-typespec cl-typespec) `(or null ,(or cl-typespec (apply-typespec 'cl-type src-typespec))))
   (quotation ()                         '(t t t t &rest nil))
   (immediate-eval ()                    nil)
   (interpreter-xform (expr)             (emit-lambda '(_ obj) (list expr)
