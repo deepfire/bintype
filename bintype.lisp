@@ -608,7 +608,7 @@
                                                      :declarations (emit-declarations :ignore '(obj)))))
 
 (defun case-able (obj)
-  (typep obj '(or number symbol)))
+  (typep obj '(or number symbol cons)))
 
 (defun emit-match-cond/case (testform matchforms)
   (if (every (compose #'case-able #'car) matchforms)
