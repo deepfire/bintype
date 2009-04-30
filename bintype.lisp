@@ -732,7 +732,8 @@
       `(progn
 	 ,@(case type
                  (:class `((defclass ,type-name () ,(mapcar #'output-defclass-field producing-toplevels))))
-                 (:structure `((defstruct ,type-name ,@(mapcar #'output-defstruct-field producing-toplevels)))))
+                 (:structure `((defstruct (,type-name ,@(when custom-prefix `((:conc-name ,custom-prefix))))
+                                 ,@(mapcar #'output-defstruct-field producing-toplevels)))))
          (let ((field-names ',field-names))
 	  (setf (gethash ',type-name *bintypes*)
 		(make-bintype :name ',type-name :documentation ,documentation :lambda-list ',lambda-list :toplevels ',toplevels
