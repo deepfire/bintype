@@ -278,6 +278,26 @@
   (op-parameter-destructurer (nil params) typespec
     (cons params (apply-typespec 'runtime-type-paramstack typespec))))
 
+(define-primitive-type bcd (width)
+  (defun apply-safe-parameter-types () '((integer 0)))
+  (defun constant-width (width) width)
+  (defun child-typestack ())
+  (defun runtime-type-paramstack ())
+  (defun initargs (width)
+    (list 'btleaf
+          :value-fn (lambda (obj)
+                      (decode-bcd (ash width -2)
+                                  (funcall (case width
+                                             (8 #'generic-u8-reader)
+                                             (16 #'generic-u16-reader)
+                                             (32 #'generic-u32-reader)
+                                             (64 #'generic-u64-reader)
+                                             (t (error "~@<Only 8, 16, 32 and 64-bit long BCD's are supported.~:@>")))
+                                           obj)))
+          :width width))
+  (defun cl-type (width) `(unsigned-byte ,(bcd-integer-length (ash width -2))))
+  (defun quotation () '(nil)))
+
 (define-primitive-type unsigned-byte (width)
   (defun apply-safe-parameter-types () '((integer 0)))
   (defun constant-width (width) width)
