@@ -3,7 +3,7 @@
   (:export
    #:bintype #:define-primitive-type #:defbintype #:parse #:export-bintype
    #:bintype-condition #:bintype-error #:bintype-parse-error #:bintype-spec-error #:bintype-simple-error
-   #:bintype-simple-parse-error #:bintype-simple-spec-error #:bintype-condition-bintype
+   #:bintype-condition-bintype
    #:expr #:_ #:flag #:match #:plain #:indirect
    #:bcd #:pure #:current-offset #:displaced-u8-vector #:terminated-string #:terminated-symbol #:funcstride-sequence
    #:set-endianness #:offset #:parent #:sub #:value #:path-value
