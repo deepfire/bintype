@@ -1,9 +1,4 @@
-;;; -*- Mode: Lisp -*-
-
-(defpackage :bintype.system
-  (:use :cl :asdf))
-
-(in-package :bintype.system)
+;;; -*- Mode: Lisp; indent-tabs-mode: nil -*-
 
 (defsystem :bintype
   :depends-on (:alexandria :pergamum)
