@@ -115,7 +115,7 @@
 
 (defvar *bintypes* (make-hash-table))
 
-(define-root-container *bintypes* bintype)
+(define-root-container *bintypes* bintype :remover t)
 
 (define-condition bintype-condition (condition) ((bintype :accessor bintype-condition-bintype :initarg :bintype)))
 (define-condition bintype-error (bintype-condition error) ())
@@ -224,9 +224,11 @@
                (unless (every (rcurry #'member lambda-binds) interested-by-list)
                  (error "~@<the interested-by binding specification ~S is not a subset of the main binding list ~S~@:>"
                         interested-by-list lambda-list))
-               (collect
-                (emit-defun (format-symbol package "~A-~A-~A" domain name query-name) lambda-list body
-                 :declarations (emit-declarations :ignore (set-difference lambda-binds interested-by-list))))))))
+               (appending
+                   (let ((fname (format-symbol package "~A-~A-~A" domain name query-name)))
+                     `((fmakunbound ',fname)
+                       ,(emit-defun fname lambda-list body
+                                    :declarations (emit-declarations :ignore (set-difference lambda-binds interested-by-list))))))))))
 
 (defmacro define-primitive-type (name lambda-list &body body)
   `(progn
@@ -746,16 +748,17 @@
                  (:structure `((defstruct (,type-name ,@(when custom-prefix `((:conc-name ,custom-prefix))))
                                  ,@(mapcar #'output-defstruct-field producing-toplevels)))))
          (let ((field-names ',field-names))
-	  (setf (gethash ',type-name *bintypes*)
-		(make-bintype :name ',type-name :documentation ,documentation :lambda-list ',lambda-list :toplevels ',toplevels
-			      :slot-map (make-array ,(length toplevels) :initial-contents field-names) :prefix ',prefix
-			      :setter-map
-                              (make-array ,field-count
-                               :initial-contents
-                               (list ,@(iter (for field-name in field-names)
-                                             (repeat field-count)
-                                             (collect `(lambda (val o)
-                                                         (setf (,(generic-slot-accessor-name (symbol-package type-name) prefix field-name) o) val)))))))))
+           (remove-bintype ',type-name)
+           (setf (bintype ',type-name)
+                 (make-bintype :name ',type-name :documentation ,documentation :lambda-list ',lambda-list :toplevels ',toplevels
+                               :slot-map (make-array ,(length toplevels) :initial-contents field-names) :prefix ',prefix
+                               :setter-map
+                               (make-array ,field-count
+                                           :initial-contents
+                                           (list ,@(iter (for field-name in field-names)
+                                                         (repeat field-count)
+                                                         (collect `(lambda (val o)
+                                                                     (setf (,(generic-slot-accessor-name (symbol-package type-name) prefix field-name) o) val)))))))))
 	 (define-primitive-type ,type-name ,lambda-list
            (defun apply-safe-parameter-types () '(&rest t))
            (defun child-typestack ())
