@@ -20,8 +20,6 @@
 
 (in-package :bintype)
 
-(defvar *bintypes* (make-hash-table))
-
 (defclass btobj ()
   ((offset :accessor offset :initarg :offset :documentation "offset in bits from stream begin")
    (parent :accessor parent :initarg :parent)
@@ -115,14 +113,15 @@
   setter-map	;; the map for the producing elements
   toplevels)
 
+(defvar *bintypes* (make-hash-table))
+
+(define-root-container *bintypes* bintype)
+
 (define-condition bintype-condition (condition) ((bintype :accessor bintype-condition-bintype :initarg :bintype)))
 (define-condition bintype-error (bintype-condition error) ())
 (define-condition bintype-parse-error (bintype-error) ())
 (define-condition bintype-spec-error (bintype-error) ())
 (define-simple-error bintype-error)
-
-(defun bintype (name)
-  (or (gethash name *bintypes*) (bintype-error "~@<Unable to find the requested bintype ~S.~:@>" name)))
 
 (defun toplevel-lambda-var (toplevel var)
   (lambda-list-1 (toplevel-op-lambda-list (car toplevel)) (rest toplevel) var))
@@ -199,9 +198,7 @@
 
 (defparameter *primitive-types* (make-hash-table :test #'eq))
 
-(defun primitive-type-p (type)
-  (op-parameter-destructurer (op nil) type
-    (gethash op *primitive-types*)))
+(define-root-container *primitive-types* primitive-type-p :type boolean :if-does-not-exist :continue)
 
 (defmacro define-lambda-mapper (domain)
   (let* ((package (symbol-package domain))
@@ -209,8 +206,7 @@
     `(progn
        (eval-when (:compile-toplevel :load-toplevel)
 	 (defparameter ,lambda-table (make-hash-table :test #'eq)))
-       (defun ,(format-symbol package "~A-LAMBDA-LIST" domain) (set-name)
-         (gethash set-name ,lambda-table))
+       (define-root-container ,lambda-table ,(format-symbol package "~A-LAMBDA-LIST" domain) :type list)
        (defun ,(format-symbol package "APPLY-~A" domain) (query-name form)
          (op-parameter-destructurer (set-name params) form
            (apply (format-symbol (find-package ',(package-name package)) "~A-~A-~A" ',domain set-name query-name)
@@ -236,7 +232,7 @@
   `(progn
      (when (primitive-type-p ',name)
        (warn "redefining ~S in DEFINE-PRIMITIVE-TYPE" ',name))
-     (setf (gethash ',name *primitive-types*) t)
+     (setf (primitive-type-p ',name) t)
      ,@(when-let ((functions (remove 'defun body :key #'car :test-not #'eq)))
                  `((define-lambda-map typespec ,name ,lambda-list
                      ,@(mapcar #'rest functions))))))
