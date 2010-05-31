@@ -198,7 +198,14 @@
 
 (defparameter *primitive-types* (make-hash-table :test #'eq))
 
-(define-root-container *primitive-types* primitive-type-p :type boolean :if-does-not-exist :continue)
+(define-root-container *primitive-types* %primitive-type-p :type boolean :if-does-not-exist :continue)
+
+(defun primitive-type-p (type)
+  (op-parameter-destructurer (op nil) type
+    (%primitive-type-p op)))
+
+(defun (setf primitive-type-p) (value type)
+  (setf (%primitive-type-p type) value))
 
 (defmacro define-lambda-mapper (domain)
   (let* ((package (symbol-package domain))
