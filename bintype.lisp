@@ -558,37 +558,41 @@
 
 ;; circularity: emit-toplevel-pavement -> toplevel-op indirect -> e-t-p.
 (defun emit-toplevel-pavement (bintype-name toplevel)
-  (let ((name (toplevel-lambda-var toplevel 'name))
-        (oos (toplevel-lambda-var toplevel 'out-of-stream-offset))
-        (typespec (apply-toplevel-op 'typespec toplevel)))
+  (let* ((name (toplevel-lambda-var toplevel 'name))
+         (oos (toplevel-lambda-var toplevel 'out-of-stream-offset))
+         (typespec (apply-toplevel-op 'typespec toplevel))
+         (sym (format-symbol nil "~A-~A-PAVEMENT" bintype-name name)))
     (with-gensyms (start-offset o-o-s-offset pretypestack subtype typestack btobj-type btobj-args)
-      (with-named-lambda-emission ((format-symbol nil "~A-~A-PAVEMENT" bintype-name name) (list start-offset)
-                                   :declarations (emit-declarations :special '(*self*)))
-        (multiple-value-bind (the-typestack custom-initargs-p) (typestack typespec)
-          `(let* (,@(when oos `((,o-o-s-offset ,oos)))
-                  (,pretypestack (list ,@the-typestack))
-                  (,subtype ,(if custom-initargs-p `(op-parameter-destructurer (type nil) (first ,pretypestack) type) `',(first typespec)))
-                  (,typestack ,(if custom-initargs-p `(op-parameter-destructurer (nil params) (first ,pretypestack) (list params)) pretypestack)))
-             (process-field (destructuring-bind (,btobj-type &rest ,btobj-args) (apply-typespec 'initargs (cons ,subtype (first ,typestack)))
-                              (apply #'make-instance ,btobj-type
-                                     :offset ,(if oos `(or ,o-o-s-offset ,start-offset) start-offset)
-                                     :parent *self*
-                                     :sub-id ',name
-                                     :typespec ',typespec
-                                     :params ,typestack
-                                     ,@(when-let ((initial-to-final-fn (apply-toplevel-op 'interpreter-xform toplevel)))
-                                                 `(:interpreter-fn ,initial-to-final-fn))
-                                     ,btobj-args))
-                            ,(apply-toplevel-op 'immediate-eval toplevel) ,start-offset ,(when oos o-o-s-offset))))))))
+      `(flet ((,sym (,start-offset)
+                (declare (special *self*))
+                ,(multiple-value-bind (the-typestack custom-initargs-p) (typestack typespec)
+                  `(let* (,@(when oos `((,o-o-s-offset ,oos)))
+                          (,pretypestack (list ,@the-typestack))
+                            (,subtype ,(if custom-initargs-p `(op-parameter-destructurer (type nil) (first ,pretypestack) type) `',(first typespec)))
+                            (,typestack ,(if custom-initargs-p `(op-parameter-destructurer (nil params) (first ,pretypestack) (list params)) pretypestack)))
+                     (process-field (destructuring-bind (,btobj-type &rest ,btobj-args) (apply-typespec 'initargs (cons ,subtype (first ,typestack)))
+                                      (apply #'make-instance ,btobj-type
+                                             :offset ,(if oos `(or ,o-o-s-offset ,start-offset) start-offset)
+                                             :parent *self*
+                                             :sub-id ',name
+                                             :typespec ',typespec
+                                             :params ,typestack
+                                             ,@(when-let ((initial-to-final-fn (apply-toplevel-op 'interpreter-xform toplevel)))
+                                                         `(:interpreter-fn ,initial-to-final-fn))
+                                             ,btobj-args))
+                                    ,(apply-toplevel-op 'immediate-eval toplevel) ,start-offset ,(when oos o-o-s-offset))))))
+         #',sym))))
 
 (defun set-endianness (val)
   (declare (type (member :little-endian :big-endian) val) (special *endianness-setter*))
   (funcall *endianness-setter* val))
 
-(defun output-paver-lambda (name lambda-list toplevels)
-  (with-named-lambda-emission ((format-symbol nil "PAVE-~A" name) lambda-list
-                               :declarations (emit-declarations :special '(*sequence*)))
-    `(compose ,@(mapcar (curry #'emit-toplevel-pavement name) (reverse toplevels)))))
+(defun output-paver-lambda (name lambda-list toplevels
+                            &aux (sym (format-symbol nil "PAVE-~A" name)))
+  `(flet ((,sym ,lambda-list
+            (declare (special *sequence*))
+            (compose ,@(mapcar (curry #'emit-toplevel-pavement name) (reverse toplevels)))))
+     #',sym))
 
 (define-lambda-map toplevel-op value (name typespec &key ignore out-of-stream-offset doc)
   (typespec (typespec)                  typespec)
